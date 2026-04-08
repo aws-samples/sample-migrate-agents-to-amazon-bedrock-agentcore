@@ -1,7 +1,13 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Inventory existing agent tools before migration to Amazon Bedrock AgentCore."""
+"""Inventory existing agent tools before migration to Amazon Bedrock AgentCore.
+
+Run this script to document your current tool definitions. Update the
+existing_tools dictionary with your actual tools before migrating.
+"""
+
+import json
 
 existing_tools = {
     "lookup_order": {
@@ -20,3 +26,7 @@ existing_tools = {
         "api_endpoint": "https://api.example.com/faq/search",
     },
 }
+
+if __name__ == "__main__":
+    print(f"Found {len(existing_tools)} tools to migrate:\n")
+    print(json.dumps(existing_tools, indent=2))

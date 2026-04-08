@@ -5,28 +5,35 @@
 
 from bedrock_agentcore.memory import MemoryClient
 
-client = MemoryClient(region_name="us-east-1")
-memory = client.create_memory_and_wait(
-    name="MigratedAgentMemory",
-    description="Memory for migrated customer support agent",
-    strategies=[
-        {
-            "summaryMemoryStrategy": {
-                "name": "SessionSummarizer",
-                "namespaceTemplates": ["/summaries/{actorId}/{sessionId}/"],
-            }
-        },
-        {
-            "userPreferenceMemoryStrategy": {
-                "name": "PreferenceLearner",
-                "namespaceTemplates": ["/preferences/{actorId}/"],
-            }
-        },
-        {
-            "semanticMemoryStrategy": {
-                "name": "FactExtractor",
-                "namespaceTemplates": ["/facts/{actorId}/"],
-            }
-        },
-    ],
-)
+
+def main():
+    client = MemoryClient(region_name="us-east-1")
+    memory = client.create_memory_and_wait(
+        name="MigratedAgentMemory",
+        description="Memory for migrated customer support agent",
+        strategies=[
+            {
+                "summaryMemoryStrategy": {
+                    "name": "SessionSummarizer",
+                    "namespaceTemplates": ["/summaries/{actorId}/{sessionId}/"],
+                }
+            },
+            {
+                "userPreferenceMemoryStrategy": {
+                    "name": "PreferenceLearner",
+                    "namespaceTemplates": ["/preferences/{actorId}/"],
+                }
+            },
+            {
+                "semanticMemoryStrategy": {
+                    "name": "FactExtractor",
+                    "namespaceTemplates": ["/facts/{actorId}/"],
+                }
+            },
+        ],
+    )
+    print(f"Memory created: {memory}")
+
+
+if __name__ == "__main__":
+    main()
