@@ -42,19 +42,26 @@ git clone https://github.com/aws-samples/sample-migrate-agents-to-amazon-bedrock
 cd sample-migrate-agents-to-amazon-bedrock-agentcore
 ```
 
-2. Install dependencies:
+2. Run the setup script (creates a virtual environment, installs dependencies, verifies AWS credentials):
 
 ```bash
+./setup.sh
+```
+
+3. Activate the environment and run an example:
+
+```bash
+source .venv/bin/activate
+python examples/rebuild/strands_agent.py
+```
+
+Alternatively, install manually:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
-
-3. Verify your AWS setup:
-
-```bash
-aws sts get-caller-identity
-```
-
-4. Choose your migration path and follow the corresponding example in `examples/`.
 
 ## Clean up
 
