@@ -25,6 +25,12 @@ examples/
 │   └── configure_memory.py     # Set up AgentCore Memory (summary, preference, semantic)
 └── validation/
     └── validate_migration.py   # Validate agent behavior post-migration
+
+docs/
+└── security-comparison.md      # Security architecture: self-hosted vs. AgentCore
+
+.github/workflows/
+└── deploy-agent.yml            # CI/CD pipeline for ARM64 builds and AgentCore deployment (manual trigger)
 ```
 
 ## Prerequisites
@@ -62,6 +68,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+## Additional resources
+
+- [Security architecture comparison](docs/security-comparison.md): Side-by-side comparison of security responsibilities when running agents on self-hosted infrastructure vs. Amazon Bedrock AgentCore.
+- [CI/CD deployment workflow](.github/workflows/deploy-agent.yml): Sample GitHub Actions pipeline for building ARM64 containers and deploying to AgentCore Runtime. Uses `workflow_dispatch` (manual trigger only).
 
 ## Clean up
 

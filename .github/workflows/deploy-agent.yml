@@ -1,0 +1,67 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+# Deploy an AI agent to Amazon Bedrock AgentCore using GitHub Actions.
+# This workflow builds an ARM64 container, pushes it to Amazon ECR,
+# and deploys to AgentCore Runtime.
+#
+# This is a SAMPLE workflow for the blog post. It uses workflow_dispatch
+# (manual trigger) so it never runs automatically.
+#
+# Prerequisites:
+#   - An IAM role configured for GitHub Actions OIDC federation
+#   - An Amazon ECR repository for your agent image
+#   - The AgentCore CLI installed (npm install -g @aws/agentcore)
+#
+# For setup instructions, refer to:
+# https://aws.amazon.com/blogs/machine-learning/deploy-ai-agents-on-amazon-bedrock-agentcore-using-github-actions/
+
+name: Deploy Agent to AgentCore
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push ARM64 image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker buildx create --use
+          docker buildx build \
+            --platform linux/arm64 \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            --push .
+
+      - name: Install AgentCore CLI
+        run: npm install -g @aws/agentcore
+
+      - name: Deploy to AgentCore Runtime
+        run: |
+          agentcore configure --entrypoint main.py
+          agentcore deploy
