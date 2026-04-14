@@ -16,6 +16,7 @@ The samples show two migration paths:
 ## Repository structure
 
 ```
+Dockerfile                          # Sample ARM64 container for AgentCore Runtime
 examples/
 ├── replatform/
 │   ├── langgraph_agent.py      # Wrap a LangGraph agent for AgentCore Runtime

@@ -1,7 +1,11 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Replatform a CrewAI agent on Amazon Bedrock AgentCore Runtime."""
+"""Replatform a CrewAI agent on Amazon Bedrock AgentCore Runtime.
+
+Usage: Replace 'from my_crew import crew' with your existing CrewAI
+crew module, then deploy to AgentCore Runtime.
+"""
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from my_crew import crew  # your existing CrewAI crew
