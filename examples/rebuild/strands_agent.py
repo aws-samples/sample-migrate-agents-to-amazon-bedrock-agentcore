@@ -14,28 +14,32 @@ app = BedrockAgentCoreApp()
 @tool
 def lookup_order(order_id: str) -> dict:
     """Look up order status by order ID."""
-    return requests.get(f"https://api.example.com/orders/{order_id}").json()
+    response = requests.get(f"https://api.example.com/orders/{order_id}")
+    response.raise_for_status()
+    return response.json()
 
 
 @tool
 def process_return(order_id: str, reason: str) -> dict:
     """Initiate a return for an order."""
-    return requests.post(
+    response = requests.post(
         "https://api.example.com/returns",
         json={"order_id": order_id, "reason": reason},
-    ).json()
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 agent = Agent(
-    model="us.anthropic.claude-sonnet-4-20250514",
+    model="us.anthropic.claude-sonnet-4-20250514-v1:0",
     system_prompt="You are a customer support assistant for ExampleCorp.",
     tools=[lookup_order, process_return],
 )
 
 
 @app.entrypoint
-def invoke(payload):
-    result = agent(payload.get("prompt", "Hello"))
+def agent_invocation(payload, context):
+    result = agent(payload.get("prompt", ""))
     return {"result": result.message}
 
 

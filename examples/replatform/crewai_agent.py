@@ -14,8 +14,8 @@ app = BedrockAgentCoreApp()
 
 
 @app.entrypoint
-def invoke(payload):
-    result = crew.kickoff(inputs={"topic": payload.get("prompt")})
+def agent_invocation(payload, context):
+    result = crew.kickoff(inputs={"topic": payload.get("prompt", "")})
     return {"result": str(result)}
 
 

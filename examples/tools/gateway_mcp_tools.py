@@ -18,7 +18,7 @@ def main():
     with mcp_client:
         tools = mcp_client.list_tools_sync()
         agent = Agent(
-            model="us.anthropic.claude-sonnet-4-20250514",
+            model="us.anthropic.claude-sonnet-4-20250514-v1:0",
             system_prompt="You are a customer support assistant...",
             tools=tools,
         )
