@@ -25,7 +25,7 @@ if [ -z "$PYTHON_CMD" ]; then
     echo "ERROR: Python 3.10+ is required. Found none."
     exit 1
 fi
-echo "[OK] Python: $($PYTHON_CMD --version)"
+echo "[OK] Python: $("$PYTHON_CMD" --version)"
 
 # Check AWS CLI
 if ! command -v aws &>/dev/null; then
@@ -45,7 +45,7 @@ echo "[OK] AWS credentials configured"
 if [ ! -d ".venv" ]; then
     echo ""
     echo "Creating virtual environment..."
-    $PYTHON_CMD -m venv .venv
+    "$PYTHON_CMD" -m venv .venv
 fi
 
 # Activate and install

@@ -14,7 +14,7 @@ app = BedrockAgentCoreApp()
 @tool
 def lookup_order(order_id: str) -> dict:
     """Look up order status by order ID."""
-    response = requests.get(f"https://api.example.com/orders/{order_id}")
+    response = requests.get(f"https://api.example.com/orders/{order_id}", timeout=30)
     response.raise_for_status()
     return response.json()
 
@@ -25,6 +25,7 @@ def process_return(order_id: str, reason: str) -> dict:
     response = requests.post(
         "https://api.example.com/returns",
         json={"order_id": order_id, "reason": reason},
+        timeout=30,
     )
     response.raise_for_status()
     return response.json()
