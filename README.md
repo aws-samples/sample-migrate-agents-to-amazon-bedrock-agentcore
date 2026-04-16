@@ -1,6 +1,6 @@
 # Migrating Agentic Workloads to Amazon Bedrock AgentCore
 
-This repository contains sample code for the AWS blog post [Migrating agentic workloads to Amazon Bedrock AgentCore from other platforms](https://aws.amazon.com/blogs/machine-learning/). It demonstrates how to migrate existing AI agents from platforms like LangGraph and CrewAI to [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
+This repository contains sample code for the AWS blog post [Migrating agentic workloads to Amazon Bedrock AgentCore from other platforms](https://aws.amazon.com/blogs/machine-learning/). It demonstrates how to migrate existing AI agents from frameworks like LangGraph and CrewAI to [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
 
 ## Architecture
 
@@ -86,7 +86,7 @@ If you created AWS resources while following the examples, delete them to avoid 
 1. Remove AgentCore Runtime deployments from the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/).
 2. Delete AgentCore Gateway API configurations.
 3. Remove AgentCore Memory stores.
-4. Delete any test IAM roles or policies.
+4. Delete the test IAM roles or policies you created.
 
 ## Security
 
