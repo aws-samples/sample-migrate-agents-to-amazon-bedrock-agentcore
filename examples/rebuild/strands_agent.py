@@ -4,7 +4,7 @@
 """Rebuild a customer support agent using Strands Agents SDK on Amazon Bedrock AgentCore Runtime."""
 
 import requests
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from bedrock_agentcore import BedrockAgentCoreApp
 from strands import Agent
 from strands.tools import tool
 

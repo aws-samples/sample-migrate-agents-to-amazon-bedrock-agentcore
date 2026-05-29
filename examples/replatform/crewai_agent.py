@@ -7,7 +7,7 @@ Usage: Replace 'from my_crew import crew' with your existing CrewAI
 crew module, then deploy to AgentCore Runtime.
 """
 
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from bedrock_agentcore import BedrockAgentCoreApp
 from my_crew import crew  # your existing CrewAI crew
 
 app = BedrockAgentCoreApp()

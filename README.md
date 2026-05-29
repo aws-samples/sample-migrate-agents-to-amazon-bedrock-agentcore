@@ -2,6 +2,8 @@
 
 This repository contains sample code for the AWS blog post [Migrating agentic workloads to Amazon Bedrock AgentCore from other platforms](https://aws.amazon.com/blogs/machine-learning/). It demonstrates how to migrate existing AI agents from frameworks like LangGraph and CrewAI to [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
 
+> **Important:** This sample code is for demonstration and educational purposes only. Review and adapt security configurations, error handling, and resource sizing for your production environment.
+
 ## Architecture
 
 ![Migration architecture from self-hosted to Amazon Bedrock AgentCore](images/agentcore-migration-architecture.png)

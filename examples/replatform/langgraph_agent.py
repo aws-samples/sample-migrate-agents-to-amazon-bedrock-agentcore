@@ -7,7 +7,7 @@ Usage: Replace 'from my_agent import graph' with your existing LangGraph
 graph module, then deploy to AgentCore Runtime.
 """
 
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from bedrock_agentcore import BedrockAgentCoreApp
 from my_agent import graph  # your existing LangGraph graph
 
 app = BedrockAgentCoreApp()

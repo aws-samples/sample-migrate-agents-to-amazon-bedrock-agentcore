@@ -64,6 +64,4 @@ jobs:
         run: npm install -g @aws/agentcore
 
       - name: Deploy to AgentCore Runtime
-        run: |
-          agentcore configure --entrypoint main.py
-          agentcore deploy
+        run: agentcore deploy --yes
