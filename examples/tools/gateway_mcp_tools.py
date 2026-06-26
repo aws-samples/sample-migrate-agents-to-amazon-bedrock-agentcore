@@ -3,22 +3,24 @@
 
 """Connect to existing APIs as MCP tools via Amazon Bedrock AgentCore Gateway."""
 
-from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamablehttp_client
 from strands import Agent
 from strands.tools.mcp import MCPClient
 
 
 def main():
-    # Connect to AgentCore Gateway via SSE
+    # Connect to AgentCore Gateway via Streamable HTTP (MCP 1.27+)
     mcp_client = MCPClient(
-        lambda: sse_client("https://your-gateway-endpoint.amazonaws.com/default/sse")
+        lambda: streamablehttp_client(
+            "https://your-gateway-id.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+        )
     )
 
     # Agent automatically discovers available tools
     with mcp_client:
         tools = mcp_client.list_tools_sync()
         agent = Agent(
-            model="us.anthropic.claude-sonnet-4-20250514-v1:0",
+            model="us.anthropic.claude-sonnet-4-6",
             system_prompt="You are a customer support assistant...",
             tools=tools,
         )

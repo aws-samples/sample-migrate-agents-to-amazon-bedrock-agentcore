@@ -32,7 +32,7 @@ def process_return(order_id: str, reason: str) -> dict:
 
 
 agent = Agent(
-    model="us.anthropic.claude-sonnet-4-20250514-v1:0",
+    model="us.anthropic.claude-sonnet-4-6",
     system_prompt="You are a customer support assistant for ExampleCorp.",
     tools=[lookup_order, process_return],
 )
