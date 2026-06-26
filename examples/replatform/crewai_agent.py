@@ -3,19 +3,40 @@
 
 """Replatform a CrewAI agent on Amazon Bedrock AgentCore Runtime.
 
-Usage: Replace 'from my_crew import crew' with your existing CrewAI
-crew module, then deploy to AgentCore Runtime.
+This example includes a minimal CrewAI crew inline for testing.
+Replace the crew definition with your own CrewAI crew.
 """
 
 from bedrock_agentcore import BedrockAgentCoreApp
-from my_crew import crew  # your existing CrewAI crew
+from crewai import Agent, Task, Crew
+
+
+# --- Replace this section with your existing CrewAI crew ---
+researcher = Agent(
+    role="Research Assistant",
+    goal="Provide helpful answers to questions",
+    backstory="You are a knowledgeable assistant.",
+    verbose=False,
+)
+
+
+def build_crew(topic: str) -> Crew:
+    task = Task(
+        description=f"Answer the following question: {topic}",
+        expected_output="A concise, helpful answer",
+        agent=researcher,
+    )
+    return Crew(agents=[researcher], tasks=[task], verbose=False)
+# --- End of replaceable section ---
+
 
 app = BedrockAgentCoreApp()
 
 
 @app.entrypoint
 def agent_invocation(payload, context):
-    result = crew.kickoff(inputs={"topic": payload.get("prompt", "")})
+    crew = build_crew(payload.get("prompt", ""))
+    result = crew.kickoff()
     return {"result": str(result)}
 
 
