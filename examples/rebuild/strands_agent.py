@@ -53,11 +53,20 @@ def build_agent(
     When ``memory_id`` is provided, conversation turns are persisted to and
     restored from AgentCore Memory via an AgentCoreMemorySessionManager, so a new
     agent built with the same ``session_id`` and ``actor_id`` resumes prior state.
-    ``extra_tools`` appends gateway-discovered MCP tools to the local tools.
+
+    The local ``@tool`` stubs represent the replatform state, before the tools
+    moved to Gateway. When ``extra_tools`` supplies gateway-discovered MCP tools,
+    each one supersedes the local stub of the same name so the agent calls the
+    gateway version rather than the placeholder endpoint. Local stubs the gateway
+    does not provide are still registered.
     """
     tools = [lookup_order, process_return]
     if extra_tools:
-        tools = tools + list(extra_tools)
+        gateway_tools = list(extra_tools)
+        # Gateway tool names carry a "<targetName>___<toolName>" prefix, e.g.
+        # "supportTools___lookup_order"; the suffix identifies the superseded stub.
+        superseded = {t.tool_name.split("___")[-1] for t in gateway_tools}
+        tools = [t for t in tools if t.tool_name not in superseded] + gateway_tools
 
     kwargs = {"model": MODEL_ID, "system_prompt": SYSTEM_PROMPT, "tools": tools}
 
