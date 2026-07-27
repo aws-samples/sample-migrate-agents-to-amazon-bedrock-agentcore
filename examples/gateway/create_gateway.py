@@ -15,6 +15,7 @@ returns that gateway instead of creating a duplicate.
 
 import argparse
 import os
+import time
 from typing import Optional, Tuple
 
 import boto3
@@ -30,6 +31,25 @@ def _find_existing_gateway(client, name: str) -> Optional[str]:
     return None
 
 
+def _wait_until_ready(client, gateway_id: str, timeout: int = 120) -> dict:
+    """Poll get_gateway until the gateway leaves CREATING, then return it.
+
+    A newly created gateway starts in CREATING; registering a target before it
+    reaches READY fails with a ValidationException, so callers must wait.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        gateway = client.get_gateway(gatewayIdentifier=gateway_id)
+        status = gateway.get("status")
+        if status == "READY":
+            return gateway
+        if status not in ("CREATING", "UPDATING"):
+            raise RuntimeError(f"Gateway {gateway_id} is in unexpected status: {status}")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Gateway {gateway_id} not READY after {timeout}s")
+        time.sleep(2)
+
+
 def create_gateway(
     name: str,
     role_arn: str,
@@ -43,12 +63,13 @@ def create_gateway(
         gateway = client.get_gateway(gatewayIdentifier=existing_id)
         print(f"Gateway '{name}' already exists: {gateway['gatewayId']}")
     else:
-        gateway = client.create_gateway(
+        created = client.create_gateway(
             name=name,
             roleArn=role_arn,
             protocolType="MCP",
             authorizerType="AWS_IAM",
         )
+        gateway = _wait_until_ready(client, created["gatewayId"])
         print(f"Created gateway '{name}': {gateway['gatewayId']}")
 
     print(f"Gateway URL: {gateway['gatewayUrl']}")

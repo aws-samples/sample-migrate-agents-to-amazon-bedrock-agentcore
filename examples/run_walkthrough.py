@@ -17,6 +17,7 @@ Pass --teardown to delete the gateway target, gateway, and memory afterward.
 
 import argparse
 import os
+import time
 import uuid
 
 import boto3
@@ -29,6 +30,21 @@ from examples.rebuild.strands_agent import build_agent
 from examples.tools.gateway_mcp_tools import build_mcp_client
 
 
+def _wait_for_target_deletion(
+    control, gateway_id: str, target_id: str, timeout: int = 60
+) -> None:
+    """Poll until the gateway target is fully deleted or the timeout elapses."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            control.get_gateway_target(
+                gatewayIdentifier=gateway_id, targetId=target_id
+            )
+        except control.exceptions.ResourceNotFoundException:
+            return
+        time.sleep(2)
+
+
 def teardown(
     gateway_id: str,
     target_id: str,
@@ -39,6 +55,9 @@ def teardown(
     control = boto3.client("bedrock-agentcore-control", region_name=region_name)
     if target_id:
         control.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=target_id)
+        # Target deletion is asynchronous; the gateway cannot be deleted while a
+        # target is still attached, so wait for the target to disappear first.
+        _wait_for_target_deletion(control, gateway_id, target_id)
         print(f"Deleted target {target_id}")
     if gateway_id:
         control.delete_gateway(gatewayIdentifier=gateway_id)
