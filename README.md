@@ -20,13 +20,17 @@ The samples show two migration paths:
 ```
 Dockerfile                          # Sample ARM64 container for AgentCore Runtime
 examples/
+├── run_walkthrough.py          # Run the full sequence end to end (create -> invoke -> teardown)
+├── gateway/
+│   ├── create_gateway.py       # Create an AgentCore Gateway (MCP, AWS_IAM authorizer)
+│   └── register_target.py      # Register a Lambda target and its tool schema
 ├── replatform/
 │   ├── langgraph_agent.py      # Wrap a LangGraph agent for AgentCore Runtime
 │   └── crewai_agent.py         # Wrap a CrewAI agent for AgentCore Runtime
 ├── rebuild/
-│   └── strands_agent.py        # Rebuild with Strands Agents SDK
+│   └── strands_agent.py        # Rebuild with Strands Agents SDK (memory-backed)
 ├── tools/
-│   ├── gateway_mcp_tools.py    # Connect existing APIs via AgentCore Gateway (MCP)
+│   ├── gateway_mcp_tools.py    # Connect to a gateway as MCP tools (SigV4-signed)
 │   └── inventory_tools.py      # Inventory existing tools before migration
 ├── memory/
 │   └── configure_memory.py     # Set up AgentCore Memory (summary, preference, semantic)
@@ -75,6 +79,38 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+## Run order
+
+The examples form one continuous sequence in which each step consumes the
+previous step's output. `examples/run_walkthrough.py` runs the whole path in
+order and passes each stage's result to the next:
+
+1. **Create a gateway** (`examples/gateway/create_gateway.py`) — creates an MCP
+   gateway with the `AWS_IAM` authorizer and returns its `gatewayId` and
+   `gatewayUrl`.
+2. **Register a target** (`examples/gateway/register_target.py`) — registers a
+   Lambda target and its `lookup_order` / `process_return` tool schema on that
+   gateway id.
+3. **Create memory** (`examples/memory/configure_memory.py`) — creates the
+   AgentCore Memory resource and returns its `memoryId`.
+4. **Build and invoke the agent** (`examples/rebuild/strands_agent.py`) —
+   `build_agent()` wires the memory id into a session manager and appends the
+   gateway-discovered MCP tools (signed with SigV4 by
+   `examples/tools/gateway_mcp_tools.py`).
+
+Run every stage in order, with a teardown at the end:
+
+```bash
+python -m examples.run_walkthrough \
+  --role-arn arn:aws:iam::<account>:role/<gateway-execution-role> \
+  --lambda-arn arn:aws:lambda:us-east-1:<account>:function/<tools-function> \
+  --teardown
+```
+
+Each stage can also be run on its own; pass the previous stage's output as an
+argument or environment variable (`GATEWAY_ID`, `GATEWAY_URL`,
+`AGENTCORE_MEMORY_ID`).
 
 ## Additional resources
 
