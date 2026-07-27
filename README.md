@@ -87,8 +87,9 @@ pip install -r requirements.txt
 
 Before the walkthrough can register a gateway target, the Lambda that backs the
 tools must exist. Create it once with the provided script, which builds the
-execution role and function from scratch and prints the ARN to use as
-`--lambda-arn`:
+Lambda execution role, the function, and the gateway execution role from
+scratch, then prints the function ARN to use as `--lambda-arn` and the gateway
+role ARN to use as `--role-arn`:
 
 ```bash
 ./examples/gateway/lambda_target/deploy.sh
@@ -116,13 +117,13 @@ Run every stage in order, with a teardown at the end:
 ```bash
 python -m examples.run_walkthrough \
   --role-arn arn:aws:iam::<account>:role/<gateway-execution-role> \
-  --lambda-arn arn:aws:lambda:us-east-1:<account>:function/<tools-function> \
+  --lambda-arn arn:aws:lambda:us-east-1:<account>:function:<tools-function> \
   --teardown
 ```
 
-`--lambda-arn` is the function ARN printed by
-`examples/gateway/lambda_target/deploy.sh`; `--role-arn` is the gateway
-execution role you provide.
+Both ARNs are printed by `examples/gateway/lambda_target/deploy.sh`:
+`--lambda-arn` is the function ARN, and `--role-arn` is the gateway execution
+role ARN that the same script creates.
 
 Each stage can also be run on its own; pass the previous stage's output as an
 argument or environment variable (`GATEWAY_ID`, `GATEWAY_URL`,
