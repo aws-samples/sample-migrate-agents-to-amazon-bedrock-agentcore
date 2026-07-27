@@ -6,7 +6,7 @@ This repository contains sample code for the AWS blog post [Migrating agentic wo
 
 ## Architecture
 
-![Migration architecture from self-hosted to Amazon Bedrock AgentCore](images/agentcore-migration-architecture.png)
+![Before and after a migration to Amazon Bedrock AgentCore. The left column shows self-hosted infrastructure: a load balancer, agent logic on Amazon ECS or AWS Lambda, a third-party model API, self-managed memory, third-party observability, and custom REST tools. The right column shows AgentCore Runtime hosting the same agent logic, with Amazon Bedrock models, AgentCore Memory, AgentCore Gateway fronting existing APIs, and a cross-cutting row holding AgentCore Identity, AgentCore Policy, and Amazon CloudWatch with AWS ADOT.](images/agentcore-migration-architecture.png)
 
 ## Overview
 
@@ -14,6 +14,8 @@ The samples show two migration paths:
 
 - **Replatform**: Wrap your existing agent (LangGraph, CrewAI) with `BedrockAgentCoreApp` to run on AgentCore Runtime without rewriting agent logic.
 - **Rebuild**: Rewrite your agent using the [Strands Agents SDK](https://github.com/strands-agents/sdk-python) for tighter AgentCore integration and model-driven orchestration.
+
+The blog post describes a third path, handing the orchestration loop to the AgentCore harness, which has no sample code in this repository.
 
 ## Repository structure
 
@@ -136,12 +138,16 @@ argument or environment variable (`GATEWAY_ID`, `GATEWAY_URL`,
 
 ## Clean up
 
-If you created AWS resources while following the examples, delete them to avoid ongoing charges:
+If you created AWS resources while following the examples, delete them to avoid ongoing charges.
 
-1. Remove AgentCore Runtime deployments from the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/).
-2. Delete AgentCore Gateway API configurations.
-3. Remove AgentCore Memory stores.
-4. Delete the test IAM roles or policies you created.
+Passing `--teardown` to `examples/run_walkthrough.py` deletes what the walkthrough created, in the required order: the gateway target first, then the gateway once target deletion has finished, then the memory resource. Deleting a gateway that still has a target attached returns `ValidationException`.
+
+To remove resources by hand:
+
+1. Delete the gateway target, then the gateway, in that order.
+2. Delete the AgentCore Memory resource.
+3. Delete the Lambda function and the two IAM roles created by `examples/gateway/lambda_target/deploy.sh`, which are the Lambda execution role and the gateway execution role.
+4. Remove any AgentCore Runtime deployment from the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/).
 
 ## Security
 
