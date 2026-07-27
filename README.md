@@ -23,7 +23,10 @@ examples/
 ├── run_walkthrough.py          # Run the full sequence end to end (create -> invoke -> teardown)
 ├── gateway/
 │   ├── create_gateway.py       # Create an AgentCore Gateway (MCP, AWS_IAM authorizer)
-│   └── register_target.py      # Register a Lambda target and its tool schema
+│   ├── register_target.py      # Register a Lambda target and its tool schema
+│   └── lambda_target/
+│       ├── lambda_function.py  # Lambda handler backing the gateway target
+│       └── deploy.sh           # Create the execution role and function from scratch
 ├── replatform/
 │   ├── langgraph_agent.py      # Wrap a LangGraph agent for AgentCore Runtime
 │   └── crewai_agent.py         # Wrap a CrewAI agent for AgentCore Runtime
@@ -82,7 +85,16 @@ pip install -r requirements.txt
 
 ## Run order
 
-The examples form one continuous sequence in which each step consumes the
+Before the walkthrough can register a gateway target, the Lambda that backs the
+tools must exist. Create it once with the provided script, which builds the
+execution role and function from scratch and prints the ARN to use as
+`--lambda-arn`:
+
+```bash
+./examples/gateway/lambda_target/deploy.sh
+```
+
+The examples then form one continuous sequence in which each step consumes the
 previous step's output. `examples/run_walkthrough.py` runs the whole path in
 order and passes each stage's result to the next:
 
@@ -107,6 +119,10 @@ python -m examples.run_walkthrough \
   --lambda-arn arn:aws:lambda:us-east-1:<account>:function/<tools-function> \
   --teardown
 ```
+
+`--lambda-arn` is the function ARN printed by
+`examples/gateway/lambda_target/deploy.sh`; `--role-arn` is the gateway
+execution role you provide.
 
 Each stage can also be run on its own; pass the previous stage's output as an
 argument or environment variable (`GATEWAY_ID`, `GATEWAY_URL`,
