@@ -56,6 +56,21 @@ MAX_EVENTS = 10000
 # number would be worse than saying so.
 
 
+def _event_order(event_id):
+    """Creation order for a service-assigned eventId.
+
+    An eventId is `[0-9]+#[a-fA-F0-9]+`, a timestamp prefix and a hex suffix
+    (`0000001756147154000#ffa53e54`). The observed values are zero-padded, but the
+    model's pattern does not promise that, so the prefix is compared as an integer
+    rather than as a string. The suffix is not a sequence, so events stamped in the
+    same millisecond remain unordered relative to each other.
+    """
+    try:
+        return int(event_id.split("#")[0])
+    except (AttributeError, ValueError):
+        return -1  # no id: sort first rather than crash the read
+
+
 def _enc(serde, obj):
     """Serialise with LangGraph's own serde, then base64 so JSON can carry it."""
     type_name, payload = serde.dumps_typed(obj)
@@ -101,8 +116,9 @@ class AgentCoreMemorySaver(BaseCheckpointSaver):
     def _records(self, thread_id, checkpoint_ns):
         """Every record this saver wrote for one thread and namespace.
 
-        Returned in whatever order the service gave them, which is unspecified.
-        Callers order what they need themselves.
+        Yields (event_id, record). The event id is the service-assigned one, and
+        it is paired with the record because the returned order is unspecified and
+        the caller needs a key to order by. Callers order what they need.
         """
         events = self.client.list_events(
             memory_id=self.memory_id,
@@ -116,7 +132,7 @@ class AgentCoreMemorySaver(BaseCheckpointSaver):
                     continue  # not ours: conversational events share this stream
                 record = json.loads(item["blob"])
                 if record.get("ns") == checkpoint_ns:
-                    yield record
+                    yield event.get("eventId", ""), record
 
     def get_tuple(self, config):
         configurable = config["configurable"]
@@ -124,7 +140,7 @@ class AgentCoreMemorySaver(BaseCheckpointSaver):
         checkpoint_ns = configurable.get("checkpoint_ns", "")
 
         records = list(self._records(thread_id, checkpoint_ns))
-        checkpoints = {r["id"]: r for r in records if r["kind"] == "checkpoint"}
+        checkpoints = {r["id"]: r for _, r in records if r["kind"] == "checkpoint"}
         if not checkpoints:
             return None  # first invocation; the loop synthesises an empty checkpoint
 
@@ -136,9 +152,12 @@ class AgentCoreMemorySaver(BaseCheckpointSaver):
 
         # Reduce the writes events client-side, because the store has no overwrite
         # primitive. Non-negative indices are first-wins; the negative special
-        # channels (__error__, __interrupt__, ...) overwrite.
+        # channels (__error__, __interrupt__, ...) overwrite. Both halves of that
+        # contract are about *write* order, so the records are sorted by eventId
+        # first rather than reduced in whatever order ListEvents happened to
+        # return them. See _event_order for what that buys and what it does not.
         writes = {}
-        for record_ in records:
+        for _, record_ in sorted(records, key=lambda pair: _event_order(pair[0])):
             if record_["kind"] != "writes" or record_["checkpoint_id"] != record["id"]:
                 continue
             for idx, (channel, value) in enumerate(record_["writes"]):
