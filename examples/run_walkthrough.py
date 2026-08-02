@@ -48,7 +48,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from examples.gateway.create_gateway import create_gateway
 from examples.gateway.register_target import register_target
-from examples.memory.configure_memory import configure_memory
+from examples.memory.configure_memory import EVENT_EXPIRY_DAYS, configure_memory
 from examples.stage0_langgraph.agent import build_graph
 from examples.stage0_langgraph.local_api import running_stub
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
@@ -209,7 +209,7 @@ def run(args: argparse.Namespace) -> None:
         target_id = register_target(
             gateway_id, args.lambda_arn, args.target_name, region
         )
-        memory_id = configure_memory(region)
+        memory_id = configure_memory(region, args.event_expiry_days)
 
     try:
         if "0" in stages:
@@ -255,6 +255,15 @@ def main() -> None:
         "--region",
         default=os.environ.get("AWS_REGION", "us-east-1"),
         help="AWS region (default: us-east-1).",
+    )
+    parser.add_argument(
+        "--event-expiry-days",
+        type=int,
+        default=int(os.environ.get("EVENT_EXPIRY_DAYS", EVENT_EXPIRY_DAYS)),
+        help=(
+            "Event retention on the memory resource, 3 to 365 "
+            f"(default: {EVENT_EXPIRY_DAYS}). Checkpoints expire with the events."
+        ),
     )
     parser.add_argument(
         "--teardown",
