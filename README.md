@@ -34,7 +34,10 @@ examples/
 │   └── crewai_agent.py         # Wrap a CrewAI agent for AgentCore Runtime
 ├── stage2_rebuild/
 │   ├── strands_agent.py        # Rebuild with Strands Agents SDK (memory-backed)
-│   └── guardrail.py            # Create, attach and delete the Bedrock Guardrail
+│   ├── guardrail.py            # Create, attach and delete the Bedrock Guardrail
+│   └── policy/
+│       ├── support_tools.cedar # Cedar rules authorizing each gateway tool call
+│       └── attach_policy.py    # Register the rules and attach them to the gateway
 ├── tools/
 │   ├── gateway_mcp_tools.py    # Connect to a gateway as MCP tools (SigV4-signed)
 │   └── inventory_tools.py      # Inventory existing tools before migration
