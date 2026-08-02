@@ -25,10 +25,10 @@ import os
 from bedrock_agentcore import BedrockAgentCoreApp
 from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import MemorySaver
 
 from examples.stage0_langgraph.agent import build_graph
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
+from examples.stage1_replatform.agentcore_memory_saver import AgentCoreMemorySaver
 from examples.stage1_replatform.langchain_mcp_tools import merge_tools, to_langchain_tools
 from examples.tools.gateway_mcp_tools import build_mcp_client
 
@@ -76,9 +76,16 @@ def support_graph():
             model=MODEL_ID,
             region_name=os.environ.get("AWS_REGION", "us-east-1"),
         )
-        # Still MemorySaver, and still in-process: diff C-1 replaces this line.
+        # Was MemorySaver(), which died with the process. The thread_id config at
+        # invoke time does not change; only where the state lives does.
         _graph = build_graph(
-            llm=llm, tools=gateway_tools(), checkpointer=MemorySaver()
+            llm=llm,
+            tools=gateway_tools(),
+            checkpointer=AgentCoreMemorySaver(
+                os.environ["AGENTCORE_MEMORY_ID"],
+                actor_id=os.environ.get("AGENTCORE_ACTOR_ID", "langgraph"),
+                region_name=os.environ.get("AWS_REGION", "us-east-1"),
+            ),
         )
     return _graph
 
