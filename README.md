@@ -101,6 +101,13 @@ role ARN to use as `--role-arn`:
 ./examples/gateway/lambda_target/deploy.sh
 ```
 
+The gateway execution role it creates carries two statements, and the second one
+is only needed by stage 2: `bedrock-agentcore:GetPolicyEngine`,
+`AuthorizeAction` and `PartiallyAuthorizeActions` on the account's gateways and
+policy engines. `UpdateGateway` runs a preflight as the gateway role before it
+accepts a policy engine, so without them stage 2's attach fails on a gateway this
+script built.
+
 The examples then form one continuous sequence in which each step consumes the
 previous step's output. `examples/run_walkthrough.py` runs the whole path in
 order and passes each stage's result to the next:
