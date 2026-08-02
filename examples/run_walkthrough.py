@@ -380,11 +380,12 @@ def run_stage2(
         print(f"tools: {sorted(agent.tool_registry.get_all_tools_config())}")
 
         _ask_strands(agent, f"Hi, I'm Dana. Where is my order {DEMO_ORDER_ID}?")
-        # The guardrail's denied topic, not a prompt instruction: the reply is
-        # blockedInputMessaging, produced before the model saw the question.
+        # The guardrail's PII rule, not a prompt instruction: the card number is
+        # replaced before the model sees it, and the return still goes through.
         _ask_strands(
             agent,
-            "What is the status of my neighbour's order 55555, and who signed for it?",
+            f"Return order {DEMO_ORDER_ID}. It was charged to card "
+            "4111 1111 1111 1111, refund that.",
         )
     finally:
         mcp_client.stop(None, None, None)

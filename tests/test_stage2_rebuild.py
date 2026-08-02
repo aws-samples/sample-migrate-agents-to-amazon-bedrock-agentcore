@@ -19,10 +19,10 @@ Two limits worth stating plainly, because they bound what passing here proves:
    tests/fake_cedar.py, so what is verified is that the rules mean what stage 2
    claims — not that the Gateway enforces them. That needs the live run.
 2. A guardrail's filtering behaviour is a model-side decision. What is verified
-   here is that the denied topic is configured, that the request carrying it is a
+   here is that the PII rule is configured, that the request carrying it is a
    valid CreateGuardrail request, and that the guardrail reaches the model the
-   agent invokes. Whether the topic classifier blocks a given sentence is only
-   observable live.
+   agent invokes. Whether a given card number is anonymised is only observable
+   live.
 
 Run from the repository root:
 
@@ -42,7 +42,6 @@ from examples import run_walkthrough
 from examples.stage2_rebuild import guardrail as guardrail_module
 from examples.stage2_rebuild.guardrail import (
     BLOCKED_INPUT_MESSAGE,
-    DENIED_TOPIC,
     GUARDRAIL_NAME,
     PII_ENTITIES,
     create_guardrail,
@@ -118,14 +117,7 @@ def real_gateway_tools(client=None):
 
 
 class GuardrailConfigTest(unittest.TestCase):
-    """The denied topic is configured, and configured as a valid request."""
-
-    def test_a_topic_about_other_customers_orders_is_denied(self):
-        self.assertEqual(DENIED_TOPIC["type"], "DENY")
-        self.assertEqual(DENIED_TOPIC["name"], "OtherCustomersOrders")
-        # The definition is what the classifier reads; examples only steer it.
-        self.assertIn("other than the customer", DENIED_TOPIC["definition"])
-        self.assertGreaterEqual(len(DENIED_TOPIC["examples"]), 3)
+    """The PII rule is configured, and configured as a valid request."""
 
     def test_the_create_request_is_a_valid_create_guardrail_request(self):
         # Validated against the real bedrock service model, so a misspelled key or
@@ -136,18 +128,29 @@ class GuardrailConfigTest(unittest.TestCase):
         self.assertEqual(operation, "create_guardrail")
         self.assertTrue(valid_request("bedrock", "CreateGuardrail", params))
 
-    def test_the_denied_topic_reaches_the_create_request(self):
+    def test_the_pii_rule_reaches_the_create_request(self):
         bedrock = FakeBedrockClient()
         self._create_with(bedrock)
         params = bedrock.calls[0][1]
-        topics = params["topicPolicyConfig"]["topicsConfig"]
-        self.assertEqual([t["name"] for t in topics], ["OtherCustomersOrders"])
-        self.assertEqual(topics[0]["type"], "DENY")
+        configured = params["sensitiveInformationPolicyConfig"]["piiEntitiesConfig"]
+        self.assertEqual(configured, PII_ENTITIES)
+
+    def test_no_topic_policy_is_configured(self):
+        # Measured live: a DENY topic written as "an order that is not the caller's"
+        # matched every prompt naming an order number, including the customer's own,
+        # because a topic classifier reads the sentence and cannot see who is asking.
+        # Who may call which tool is Cedar's job, at the gateway. A topic policy
+        # reappearing here would put that decision back in the wrong place.
+        bedrock = FakeBedrockClient()
+        self._create_with(bedrock)
+        params = bedrock.calls[0][1]
+        self.assertNotIn("topicPolicyConfig", params)
+        self.assertFalse(hasattr(guardrail_module, "DENIED_TOPIC"))
 
     def test_the_refusal_text_is_configured_rather_than_left_to_the_model(self):
-        # blockedInputMessaging is what the caller sees when the topic matches. If
-        # it were unset the refusal would be the model's own words, which is the
-        # thing a guardrail exists to stop being a prompt-engineering problem.
+        # CreateGuardrail requires both messages whatever the policies are, and an
+        # unset one would leave a refusal in the model's own words — the thing a
+        # guardrail exists to stop being a prompt-engineering problem.
         bedrock = FakeBedrockClient()
         self._create_with(bedrock)
         params = bedrock.calls[0][1]

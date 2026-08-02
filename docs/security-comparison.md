@@ -31,9 +31,13 @@ The two rows above are the two security features stage 2 adds, and they are easy
 | Where it runs | In the Amazon Bedrock model invocation | In the AgentCore Gateway, before the target is invoked |
 | Written as | Guardrail configuration (`topicPolicyConfig`, `sensitiveInformationPolicyConfig`) | Cedar rules, default-deny and forbid-wins |
 | Diff on the agent | Two model parameters, `guardrail_id` and `guardrail_version` | None — the decision lives at the gateway |
-| Failure it prevents | The agent discussing something it should not discuss | The agent doing something the caller is not entitled to do |
+| Failure it prevents | Sensitive text reaching the model, being stored in the transcript, or being echoed back | The agent doing something the caller is not entitled to do |
 
-One protects what the model may say; the other protects what a caller may do. A guardrail cannot stop a `process_return` call that the model was correctly persuaded to make, because by the time the tool runs the text has already passed. A Cedar rule cannot stop the model describing another customer's order, because it never sees the model's tokens. In `examples/stage2_rebuild/` these are separate files for that reason: `guardrail.py` configures the model, and `policy/support_tools.cedar` authorizes the tools.
+One protects what the model may say; the other protects what a caller may do. A guardrail cannot stop a `process_return` call that the model was correctly persuaded to make, because by the time the tool runs the text has already passed. A Cedar rule cannot stop the model repeating a card number back to the customer, because it never sees the model's tokens. In `examples/stage2_rebuild/` these are separate files for that reason: `guardrail.py` configures the model, and `policy/support_tools.cedar` authorizes the tools.
+
+The line between them is easy to cross by accident, and stage 2 crossed it once. An earlier version of `guardrail.py` configured a DENY topic for "an order belonging to anyone other than the customer in this conversation". Measured live, it blocked every prompt naming an order number, including the customer's own: a topic classifier reads the sentence, and the sentence "where is my order 12345" is indistinguishable from "where is order 12345" without knowing who is asking. Ownership is not a property of the text. It was deleted, and the shipped guardrail configures the PII rule only.
+
+What the shipped Cedar rules use is the first two columns of that row — the caller and the tool — because the gateway's `AWS_IAM` authorizer presents an ARN and no claims. `context.input` conditions are available and validate; the sample does not need one, and a rule comparing a tool argument against *who the caller is* needs a `CUSTOM_JWT` authorizer to have a claim to compare against.
 
 Both are also worth contrasting with the third option, which is a sentence in the system prompt. A prompt instruction is not an access control: it is advice to a probabilistic system, it is not auditable, and it is not enforced anywhere. Moving a rule from the prompt into a guardrail or a Cedar policy is the point of stage 2.
 

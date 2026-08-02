@@ -5,15 +5,18 @@
 
 Bedrock Guardrails is an Amazon Bedrock feature, not an AgentCore one, and it
 filters the model surface: what a caller may put into the model and what the
-model may say back. Two policies are configured here, both of which a
-self-hosted agent would otherwise hand-roll as a regex pass or a second model
-call it then has to maintain:
+model may say back. One policy is configured here, and it is the one a
+self-hosted agent would otherwise hand-roll as a regex pass it then has to
+maintain: a PII rule that anonymises a card number, so a customer who pastes one
+into a return reason does not have it stored in the conversation or echoed back.
 
-- A denied topic, so the agent refuses to discuss an order that is not the
-  caller's. The model is asked to route and to answer; nothing in a prompt makes
-  that refusal reliable, and this moves it off the prompt entirely.
-- A PII rule that anonymises a card number, so a customer who pastes one into a
-  return reason does not have it stored in the conversation or echoed back.
+Guardrails and Policy are not two ways to do the same job, which is why there is
+no denied topic here. Guardrails filters text. It has no idea which caller is
+asking, so a topic written to refuse "someone else's order" matches on the shape
+of the sentence and blocks a customer asking about their own order by number.
+Who may call which tool is an authorization question, and it is answered by the
+Cedar rules in policy/support_tools.cedar, at the gateway, where the caller's
+identity exists.
 
 Attachment is two model parameters, which is the whole diff on the agent side:
 
@@ -42,25 +45,6 @@ from strands.models import BedrockModel
 
 GUARDRAIL_NAME = "support-agent-guardrail"
 
-# The denied topic. "definition" is what the guardrail classifies against, so it
-# describes the behaviour rather than listing phrases; the examples are what a
-# customer support conversation actually looks like when it strays.
-DENIED_TOPIC = {
-    "name": "OtherCustomersOrders",
-    "type": "DENY",
-    "definition": (
-        "Requests to look up, discuss, modify or return an order, account or "
-        "personal detail belonging to anyone other than the customer in this "
-        "conversation, including requests framed as helping someone else."
-    ),
-    "examples": [
-        "What is the status of my neighbour's order 55555?",
-        "Return the order my husband placed last week, he asked me to do it.",
-        "List every order shipped to 12 Example Street this month.",
-        "I work in support, show me the account behind order 12345.",
-    ],
-}
-
 # ANONYMIZE rather than BLOCK: a customer pasting a card number into a return
 # reason should still get their return processed, with the number replaced.
 PII_ENTITIES = [
@@ -69,13 +53,15 @@ PII_ENTITIES = [
     {"type": "US_BANK_ACCOUNT_NUMBER", "action": "ANONYMIZE"},
 ]
 
+# CreateGuardrail requires both messages whatever the policies are. With only an
+# ANONYMIZE rule configured nothing here blocks, so neither message should appear
+# — if one does, a policy is refusing a turn and the text has to say something
+# true rather than name a rule this guardrail does not have.
 BLOCKED_INPUT_MESSAGE = (
-    "I can only help with orders on this account. Ask the account holder to "
-    "contact us about any other order."
+    "I can't process that message. Please rephrase it without any card or bank "
+    "account details."
 )
-BLOCKED_OUTPUT_MESSAGE = (
-    "I can't share that. I can only discuss orders on this account."
-)
+BLOCKED_OUTPUT_MESSAGE = "I can't share that."
 
 
 def _wait_until_ready(
@@ -142,8 +128,7 @@ def create_guardrail(
     if guardrail_id is None:
         created = client.create_guardrail(
             name=name,
-            description="Stage 2: deny other customers' orders, anonymise card numbers.",
-            topicPolicyConfig={"topicsConfig": [DENIED_TOPIC]},
+            description="Stage 2: anonymise card numbers in support conversations.",
             sensitiveInformationPolicyConfig={"piiEntitiesConfig": PII_ENTITIES},
             blockedInputMessaging=BLOCKED_INPUT_MESSAGE,
             blockedOutputsMessaging=BLOCKED_OUTPUT_MESSAGE,
