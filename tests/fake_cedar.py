@@ -16,7 +16,8 @@ behaviours the file depends on:
 4. a ``when`` condition over ``context.input.<name>``.
 
 What it is not: Cedar. It has no schema validation, no entity hierarchy, no
-``in``, no sets, no ``unless``, and no operators besides ``==`` and ``&&``. That
+``in``, no sets, no ``unless``, and no operators besides ``==``, ``!=`` and
+``&&``. That
 matters for how it fails — anything outside the subset raises rather than being
 ignored, so a rule edited into a form this cannot evaluate breaks the test
 instead of silently passing it. Real enforcement is only observable against a
@@ -36,8 +37,8 @@ _COMMENT = re.compile(r"//[^\n]*")
 # AgentCore::IamEntity::"arn:aws:..." -> type "AgentCore::IamEntity", id the ARN.
 _EQUALS = re.compile(r'^(principal|action|resource)\s*==\s*([A-Za-z:]+?)::"([^"]*)"$')
 _IS = re.compile(r"^(principal|resource)\s+is\s+([A-Za-z][A-Za-z:]*)$")
-_CONTEXT_EQUALS = re.compile(
-    r'^context\.input\.([A-Za-z_][A-Za-z0-9_]*)\s*==\s*"([^"]*)"$'
+_CONTEXT_COMPARE = re.compile(
+    r'^context\.input\.([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=)\s*"([^"]*)"$'
 )
 
 
@@ -54,7 +55,7 @@ class Statement(NamedTuple):
     principal_id: Optional[str]
     action: Optional[str]
     resource_id: Optional[str]
-    conditions: Tuple[Tuple[str, str], ...]
+    conditions: Tuple[Tuple[str, str, str], ...]
 
 
 def parse(text: str) -> List[Statement]:
@@ -106,16 +107,16 @@ def _parse_scope(scope: str):
     return principal_type, principal_id, action, resource_id
 
 
-def _parse_when(when: Optional[str]) -> Tuple[Tuple[str, str], ...]:
+def _parse_when(when: Optional[str]) -> Tuple[Tuple[str, str, str], ...]:
     """Read a when block of context.input comparisons joined by &&."""
     if not when or not when.strip():
         return ()
     conditions = []
     for part in when.split("&&"):
-        match = _CONTEXT_EQUALS.match(part.strip())
+        match = _CONTEXT_COMPARE.match(part.strip())
         if not match:
             raise ValueError(f"Unsupported Cedar condition: {part.strip()!r}")
-        conditions.append((match.group(1), match.group(2)))
+        conditions.append(match.groups())
     return tuple(conditions)
 
 
@@ -134,10 +135,14 @@ def _matches(
         return False
     if statement.principal_id is not None and statement.principal_id != principal.id:
         return False
-    for name, expected in statement.conditions:
+    for name, operator, expected in statement.conditions:
         # A missing attribute is an evaluation error in Cedar, and an errored
-        # policy does not contribute a permit. Not matching is the same outcome.
-        if tool_input.get(name) != expected:
+        # policy does not contribute a permit. Not matching is the same outcome,
+        # and it is why != has to check presence before comparing: an absent
+        # order_id is an error, not a value that differs from "".
+        if name not in tool_input:
+            return False
+        if (tool_input[name] == expected) is not (operator == "=="):
             return False
     return True
 

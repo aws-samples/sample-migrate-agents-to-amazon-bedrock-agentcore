@@ -462,8 +462,11 @@ class PolicyRenderingTest(unittest.TestCase):
         rules = dict(render_policies(GATEWAY_ARN, OWNER, OWNED_ORDER))
         self.assertIn("context.input.order_id", rules["ProcessReturnForOwnerOnly"])
         self.assertIn(OWNER, rules["ProcessReturnForOwnerOnly"])
-        # The lookup rule is deliberately unconditioned on the caller.
-        self.assertNotIn("context.input", rules["LookupOrderForAnyCaller"])
+        # The lookup rule names no caller, but it cannot be unconditioned either:
+        # the service rejects an unconditioned permit as overly permissive, so it
+        # carries the weakest condition that validates.
+        self.assertIn('context.input.order_id != ""', rules["LookupOrderForAnyCaller"])
+        self.assertNotIn(OWNER, rules["LookupOrderForAnyCaller"])
 
 
 class PolicyRegistrationTest(unittest.TestCase):

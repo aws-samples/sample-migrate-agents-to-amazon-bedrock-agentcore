@@ -32,13 +32,20 @@
 
 // === policy: LookupOrderForAnyCaller ===
 // Reading an order's status is permitted for any caller the gateway
-// authenticated. Nothing narrows it, which is deliberate: this is the tool the
-// agent needs on every turn, and the interesting rule is the next one.
+// authenticated. The when clause is not the security control here, it is what the
+// service's policy validator demands: an unconditioned permit is rejected as
+// overly permissive, and so is context.input has order_id, which the validator
+// still reads as matching every request. A non-empty order_id is the weakest
+// condition that passes. The rejection is asynchronous — CreatePolicy returns a
+// policyId and the policy then reaches CREATE_FAILED.
 permit(
   principal is AgentCore::IamEntity,
   action == AgentCore::Action::"supportTools___lookup_order",
   resource == AgentCore::Gateway::"<GATEWAY_ARN>"
-);
+)
+when {
+  context.input.order_id != ""
+};
 
 // === policy: ProcessReturnForOwnerOnly ===
 // Starting a return is permitted only for the caller that owns the order, which
