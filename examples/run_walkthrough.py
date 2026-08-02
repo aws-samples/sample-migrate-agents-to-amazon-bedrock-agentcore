@@ -25,13 +25,24 @@ memory id flows into the checkpointer, and one thread id is reused across two
 separately constructed graphs so that the second invocation resumes state no
 object in this process was holding.
 
-Stage 2 is the hardening stage. It is a declared no-op here.
+Stage 2 rebuilds the agent on the Strands Agents SDK and hardens it. The graph and
+its hand-written router are gone, replaced by a model-driven loop over the same
+Gateway tools and the same memory resource, and two security features are layered
+on: a Bedrock Guardrail on the model, and Cedar rules in Policy in AgentCore on
+the tool calls.
 
-The Strands rebuild path is a different migration path rather than a later stage,
-so it keeps its own entry point at examples/stage2_rebuild/strands_agent.py.
+    create guardrail -> build the Strands agent behind it
+        -> register Cedar rules and attach them to the gateway in ENFORCE mode
+        -> invoke, then call one permitted and one denied tool
 
-Pass --teardown to delete the gateway target, the gateway and the memory
-afterward. The Lambda and the two IAM roles come from
+Stage 2 reuses the gateway, target and memory stage 1 creates, so it needs the
+same two ARNs. It has its own entry point at
+examples/stage2_rebuild/strands_agent.py for deploying it to Runtime.
+
+Pass --teardown to delete what ran: the gateway target, the gateway, the memory,
+the guardrail, then the Cedar policies and their engine. Every step is attempted
+even if an earlier one failed, because a delete that skips the rest of the list is
+how resources get orphaned. The Lambda and the two IAM roles come from
 examples/gateway/lambda_target/deploy.sh and are not deleted here.
 """
 
@@ -39,6 +50,7 @@ import argparse
 import os
 import time
 import uuid
+from typing import Sequence
 
 import boto3
 from bedrock_agentcore.memory import MemoryClient
@@ -54,13 +66,32 @@ from examples.stage0_langgraph.local_api import running_stub
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
 from examples.stage1_replatform.agentcore_memory_saver import AgentCoreMemorySaver
 from examples.stage1_replatform.langchain_mcp_tools import merge_tools, to_langchain_tools
+from examples.stage2_rebuild.guardrail import (
+    create_guardrail,
+    delete_guardrail,
+    guarded_model,
+)
+from examples.stage2_rebuild.policy.attach_policy import (
+    caller_principal,
+    call_tool_through_gateway,
+    delete_policies,
+    delete_policy_engine,
+    register,
+)
+from examples.stage2_rebuild.strands_agent import build_agent
 from examples.tools.gateway_mcp_tools import build_mcp_client
 
 MODEL_ID = "us.anthropic.claude-sonnet-5"
 
 # Stages that need a gateway, a target and a memory resource, and therefore need
-# --role-arn and --lambda-arn.
-AGENTCORE_STAGES = ("1", "all")
+# --role-arn and --lambda-arn. Stage 2 rebuilds the agent on top of the same three
+# resources rather than creating its own.
+AGENTCORE_STAGES = ("1", "2", "all")
+
+# The order stage 2's Cedar rules say this caller owns, and the one they say it
+# does not. The second is the deny the walkthrough demonstrates.
+OWNED_ORDER_ID = "12345"
+OTHER_ORDER_ID = "99999"
 
 
 def _wait_for_target_deletion(
@@ -78,26 +109,123 @@ def _wait_for_target_deletion(
         time.sleep(2)
 
 
+def _delete_target(control, gateway_id: str, target_id: str) -> None:
+    """Delete the gateway target and wait for it to disappear."""
+    try:
+        control.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=target_id)
+    except control.exceptions.ResourceNotFoundException:
+        print(f"Target {target_id} already deleted")
+        return
+    # Target deletion is asynchronous; the gateway cannot be deleted while a
+    # target is still attached, so wait for the target to disappear first.
+    _wait_for_target_deletion(control, gateway_id, target_id)
+    print(f"Deleted target {target_id}")
+
+
+def _delete_gateway(control, gateway_id: str, timeout: int = 120) -> None:
+    """Delete the gateway, retrying while the service still sees a target on it.
+
+    Measured, not assumed: DeleteGateway failed with "Gateway ... has targets
+    associated with it" while ListGatewayTargets already returned [] for the same
+    gateway. So the absence of a target in a list call is not proof the gateway can
+    go, and the delete has to be retried; completion is then confirmed by
+    GetGateway raising ResourceNotFoundException rather than by the delete
+    returning.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            control.delete_gateway(gatewayIdentifier=gateway_id)
+            break
+        except control.exceptions.ResourceNotFoundException:
+            print(f"Gateway {gateway_id} already deleted")
+            return
+        except control.exceptions.ValidationException:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(5)
+
+    while time.monotonic() < deadline:
+        try:
+            control.get_gateway(gatewayIdentifier=gateway_id)
+        except control.exceptions.ResourceNotFoundException:
+            print(f"Deleted gateway {gateway_id}")
+            return
+        time.sleep(2)
+    raise TimeoutError(f"Gateway {gateway_id} still present after {timeout}s")
+
+
+def _delete_memory(memory_id: str, region_name: str) -> None:
+    """Delete the memory resource and wait until GetMemory says it is gone.
+
+    DeleteMemory is asynchronous and the memory is still listed seconds after the
+    call returns, so delete_memory_and_wait is used rather than delete_memory: it
+    polls GetMemory until ResourceNotFoundException.
+    """
+    MemoryClient(region_name=region_name).delete_memory_and_wait(memory_id)
+    print(f"Deleted memory {memory_id}")
+
+
 def teardown(
     gateway_id: str,
     target_id: str,
     memory_id: str,
     region_name: str,
+    guardrail_id: str = "",
+    policy_engine_id: str = "",
+    policy_ids: Sequence[str] = (),
 ) -> None:
-    """Delete the resources created during the walkthrough."""
+    """Delete everything the walkthrough created, in dependency order.
+
+    Target, then gateway, then memory, then guardrail, then the Cedar policies and
+    last their engine. The first two are ordered by the service — a gateway with a
+    target attached will not delete — and the engine goes after the gateway that
+    referenced it.
+
+    Every step is attempted even when an earlier one raises, and the failures are
+    collected and re-raised together at the end. A teardown that stops at its first
+    error is how a run orphans a gateway behind a target that would not delete, and
+    adding a guardrail to the end of a fail-fast sequence would have made a
+    billable resource the most likely thing to survive.
+    """
     control = boto3.client("bedrock-agentcore-control", region_name=region_name)
+    steps = []
     if target_id:
-        control.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=target_id)
-        # Target deletion is asynchronous; the gateway cannot be deleted while a
-        # target is still attached, so wait for the target to disappear first.
-        _wait_for_target_deletion(control, gateway_id, target_id)
-        print(f"Deleted target {target_id}")
+        steps.append(("target", lambda: _delete_target(control, gateway_id, target_id)))
     if gateway_id:
-        control.delete_gateway(gatewayIdentifier=gateway_id)
-        print(f"Deleted gateway {gateway_id}")
+        steps.append(("gateway", lambda: _delete_gateway(control, gateway_id)))
     if memory_id:
-        MemoryClient(region_name=region_name).delete_memory(memory_id)
-        print(f"Deleted memory {memory_id}")
+        steps.append(("memory", lambda: _delete_memory(memory_id, region_name)))
+    if guardrail_id:
+        steps.append(
+            ("guardrail", lambda: delete_guardrail(guardrail_id, region_name))
+        )
+    if policy_ids:
+        steps.append(
+            (
+                "policies",
+                lambda: delete_policies(policy_engine_id, list(policy_ids), region_name),
+            )
+        )
+    if policy_engine_id:
+        steps.append(
+            (
+                "policy engine",
+                lambda: delete_policy_engine(policy_engine_id, region_name),
+            )
+        )
+
+    failures = []
+    for label, delete in steps:
+        try:
+            delete()
+        except Exception as error:  # noqa: BLE001 - the next resource still matters
+            print(f"Failed to delete {label}: {type(error).__name__}: {error}")
+            failures.append(f"{label} ({type(error).__name__})")
+    if failures:
+        raise RuntimeError(
+            "Teardown did not finish; check these by hand: " + ", ".join(failures)
+        )
 
 
 def _ask(graph, prompt: str, thread_id: str) -> dict:
@@ -188,10 +316,98 @@ def run_stage1(
             mcp_client.stop(None, None, None)
 
 
-def run_stage2() -> None:
-    """Stage 2: hardening. Nothing here yet, and saying so beats implying otherwise."""
-    print("\n=== stage 2: hardening ===")
-    print("No-op: guardrails and policy are not implemented in this repository.")
+def _ask_strands(agent, prompt: str) -> str:
+    """Invoke the Strands agent once and print what came back.
+
+    There is no state dict to inspect and no intent field to print, because there
+    is no router: what the agent did is whatever the model decided to do. That
+    absence is the stage-2 diff.
+    """
+    print(f"\ncustomer: {prompt}")
+    result = agent(prompt)
+    text = str(result.message)
+    print(f"  agent: {text}")
+    return text
+
+
+def run_stage2(
+    gateway_id: str,
+    gateway_url: str,
+    gateway_arn: str,
+    memory_id: str,
+    actor_id: str,
+    session_id: str,
+    region_name: str,
+    created: dict,
+) -> None:
+    """Stage 2: the Strands rebuild, behind a Guardrail, with Cedar on its tools.
+
+    ``created`` is filled in as each resource comes up rather than returned at the
+    end, so that a failure part way through still leaves teardown able to delete
+    what exists. A guardrail created and then lost to an exception is a resource
+    that bills until someone finds it.
+    """
+    print("\n=== stage 2: Strands rebuild + Guardrails + Policy ===")
+
+    guardrail_id, guardrail_version = create_guardrail(region_name=region_name)
+    created["guardrail_id"] = guardrail_id
+
+    owner = caller_principal(region_name)
+    print(f"policy owner principal: {owner}")
+    engine_id, policies = register(
+        gateway_id, gateway_arn, owner, OWNED_ORDER_ID, "ENFORCE", region_name
+    )
+    created["policy_engine_id"] = engine_id
+    created["policy_ids"] = list(policies.values())
+
+    mcp_client = build_mcp_client(gateway_url, region_name)
+    mcp_client.start()
+    try:
+        agent = build_agent(
+            memory_id=memory_id,
+            session_id=session_id,
+            actor_id=actor_id,
+            extra_tools=mcp_client.list_tools_sync(),
+            region_name=region_name,
+            model=guarded_model(
+                guardrail_id, MODEL_ID, guardrail_version, region_name
+            ),
+        )
+        print(f"tools: {[t.tool_name for t in agent.tool_registry.get_all_tools_config()]}")
+
+        _ask_strands(agent, f"Hi, I'm Dana. Where is my order {OWNED_ORDER_ID}?")
+        # The guardrail's denied topic, not a prompt instruction: the reply is
+        # blockedInputMessaging, produced before the model saw the question.
+        _ask_strands(
+            agent,
+            "What is the status of my neighbour's order 55555, and who signed for it?",
+        )
+    finally:
+        mcp_client.stop(None, None, None)
+
+    # Cedar decides at the gateway, so the way to read the decision is to make the
+    # call. Same caller, same tool, two different orders.
+    allowed, text = call_tool_through_gateway(
+        gateway_url,
+        "supportTools___lookup_order",
+        {"order_id": OTHER_ORDER_ID},
+        region_name,
+    )
+    print(f"\nlookup_order({OTHER_ORDER_ID}) allowed={allowed}: {text[:120]}")
+    allowed, text = call_tool_through_gateway(
+        gateway_url,
+        "supportTools___process_return",
+        {"order_id": OTHER_ORDER_ID, "reason": "changed my mind"},
+        region_name,
+    )
+    print(f"process_return({OTHER_ORDER_ID}) allowed={allowed}: {text[:120]}")
+    allowed, text = call_tool_through_gateway(
+        gateway_url,
+        "supportTools___process_return",
+        {"order_id": OWNED_ORDER_ID, "reason": "damaged in transit"},
+        region_name,
+    )
+    print(f"process_return({OWNED_ORDER_ID}) allowed={allowed}: {text[:120]}")
 
 
 def run(args: argparse.Namespace) -> None:
@@ -201,7 +417,10 @@ def run(args: argparse.Namespace) -> None:
     actor_id = f"customer-{uuid.uuid4().hex[:8]}"
 
     gateway_id = target_id = memory_id = ""
-    gateway_url = ""
+    gateway_url = gateway_arn = ""
+    # Stage 2's resources land here as they are created, so teardown can delete
+    # them even if the stage raises half way through creating them.
+    created = {}
     if args.stage in AGENTCORE_STAGES:
         gateway_id, gateway_url = create_gateway(
             args.gateway_name, args.role_arn, region
@@ -210,6 +429,11 @@ def run(args: argparse.Namespace) -> None:
             gateway_id, args.lambda_arn, args.target_name, region
         )
         memory_id = configure_memory(region, args.event_expiry_days)
+        if "2" in stages:
+            # Cedar names the gateway by ARN, which create_gateway does not return.
+            gateway_arn = boto3.client(
+                "bedrock-agentcore-control", region_name=region
+            ).get_gateway(gatewayIdentifier=gateway_id)["gatewayArn"]
 
     try:
         if "0" in stages:
@@ -217,10 +441,27 @@ def run(args: argparse.Namespace) -> None:
         if "1" in stages:
             run_stage1(gateway_url, memory_id, actor_id, session_id, region)
         if "2" in stages:
-            run_stage2()
+            run_stage2(
+                gateway_id,
+                gateway_url,
+                gateway_arn,
+                memory_id,
+                actor_id,
+                f"{session_id}-strands",
+                region,
+                created,
+            )
     finally:
         if args.teardown:
-            teardown(gateway_id, target_id, memory_id, region)
+            teardown(
+                gateway_id,
+                target_id,
+                memory_id,
+                region,
+                guardrail_id=created.get("guardrail_id", ""),
+                policy_engine_id=created.get("policy_engine_id", ""),
+                policy_ids=created.get("policy_ids", ()),
+            )
 
 
 def main() -> None:
@@ -268,17 +509,25 @@ def main() -> None:
     parser.add_argument(
         "--teardown",
         action="store_true",
-        help="Delete the gateway target, gateway, and memory after running.",
+        help=(
+            "Delete the gateway target, gateway, memory, guardrail and Cedar "
+            "policies after running."
+        ),
     )
     args = parser.parse_args()
 
-    # Stage 0 and stage 2 create nothing, so they need neither ARN.
+    # Stage 0 creates nothing, so it needs neither ARN. Stage 2 needs both because
+    # it reuses the gateway, target and memory that stage 1 stands up.
     if args.stage in AGENTCORE_STAGES:
         if not args.role_arn:
-            parser.error("--role-arn is required for stage 1 (or set GATEWAY_ROLE_ARN).")
+            parser.error(
+                f"--role-arn is required for stage {args.stage} "
+                "(or set GATEWAY_ROLE_ARN)."
+            )
         if not args.lambda_arn:
             parser.error(
-                "--lambda-arn is required for stage 1 (or set TARGET_LAMBDA_ARN)."
+                f"--lambda-arn is required for stage {args.stage} "
+                "(or set TARGET_LAMBDA_ARN)."
             )
 
     run(args)

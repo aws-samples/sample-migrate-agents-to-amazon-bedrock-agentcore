@@ -130,10 +130,12 @@ python -m examples.run_walkthrough \
 
 `--stage` selects one stage instead of all of them. `--stage 0` is the
 self-hosted starting point and creates nothing, so it needs neither ARN;
-`--stage 1` creates the gateway, target and memory above; `--stage 2` is the
-hardening stage and is a declared no-op. The Strands rebuild in
-`examples/stage2_rebuild/strands_agent.py` is a separate migration path rather
-than a later stage, and has its own entry point.
+`--stage 1` creates the gateway, target and memory above; `--stage 2` rebuilds
+the agent on Strands and hardens it, reusing stage 1's three resources and so
+needing the same two ARNs. Stage 2 creates a Bedrock Guardrail and a Cedar
+policy engine of its own, and `--teardown` deletes both. The rebuilt agent also
+has its own Runtime entry point at
+`examples/stage2_rebuild/strands_agent.py`.
 
 Both ARNs are printed by `examples/gateway/lambda_target/deploy.sh`:
 `--lambda-arn` is the function ARN, and `--role-arn` is the gateway execution
@@ -152,7 +154,7 @@ argument or environment variable (`GATEWAY_ID`, `GATEWAY_URL`,
 
 If you created AWS resources while following the examples, delete them to avoid ongoing charges.
 
-Passing `--teardown` to `examples/run_walkthrough.py` deletes what the walkthrough created, in the required order: the gateway target first, then the gateway once target deletion has finished, then the memory resource. Deleting a gateway that still has a target attached returns `ValidationException`.
+Passing `--teardown` to `examples/run_walkthrough.py` deletes what the walkthrough created, in the required order: the gateway target first, then the gateway once target deletion has finished, then the memory resource, then stage 2's guardrail, and last the Cedar policies and the policy engine holding them. Deleting a gateway that still has a target attached returns `ValidationException`, and it does so for a while after `ListGatewayTargets` already returns nothing, so the delete is retried and completion is confirmed with `GetGateway`. Every step is attempted even when an earlier one fails, and the failures are reported together at the end: the guardrail is billable, so it must not be the resource a fail-fast teardown skips.
 
 To remove resources by hand:
 
