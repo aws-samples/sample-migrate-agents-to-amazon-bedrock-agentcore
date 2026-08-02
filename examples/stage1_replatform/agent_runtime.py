@@ -29,12 +29,37 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from examples.stage0_langgraph.agent import build_graph
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
+from examples.stage1_replatform.langchain_mcp_tools import merge_tools, to_langchain_tools
+from examples.tools.gateway_mcp_tools import build_mcp_client
 
 MODEL_ID = "us.anthropic.claude-sonnet-5"
 
 app = BedrockAgentCoreApp()
 
 _graph = None
+
+# Module scope on purpose. The MCP session's background thread has to outlive any
+# single invocation, because tools built inside a `with mcp_client:` block raise
+# MCPClientInitializationError once the block exits.
+_mcp_client = None
+
+
+def gateway_tools():
+    """Discover the Gateway's tools, and let them supersede the local stubs.
+
+    lookup_order and process_return now come from Gateway. search_faq is not
+    published there, so merge_tools keeps the local one — the partial migration
+    the post argues for, expressed in one function call.
+    """
+    global _mcp_client
+    if _mcp_client is None:
+        _mcp_client = build_mcp_client(
+            os.environ["GATEWAY_URL"],
+            os.environ.get("AWS_REGION", "us-east-1"),
+        )
+        _mcp_client.start()  # not `with`: held for the process lifetime
+    tools = to_langchain_tools(_mcp_client, _mcp_client.list_tools_sync())
+    return merge_tools(SUPPORT_TOOLS, tools)
 
 
 def support_graph():
@@ -53,7 +78,7 @@ def support_graph():
         )
         # Still MemorySaver, and still in-process: diff C-1 replaces this line.
         _graph = build_graph(
-            llm=llm, tools=SUPPORT_TOOLS, checkpointer=MemorySaver()
+            llm=llm, tools=gateway_tools(), checkpointer=MemorySaver()
         )
     return _graph
 
