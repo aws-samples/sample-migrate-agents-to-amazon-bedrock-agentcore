@@ -560,6 +560,19 @@ class PolicyRegistrationTest(unittest.TestCase):
         self.assertNotIn("create_policy_engine", self.operations())
         self.assertEqual(self.control.engines[first]["name"], POLICY_ENGINE_NAME)
 
+    def test_the_engine_is_active_before_any_rule_is_created_on_it(self):
+        # CreatePolicy against an engine still CREATING is a request that fails at
+        # step 10 and nowhere earlier, so the waiter has to run before the first
+        # rule rather than being implied by the policy waits after it.
+        self.control.active_after = 2
+
+        register("gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "ENFORCE", "us-east-1")
+
+        operations = self.operations()
+        before_first_rule = operations[: operations.index("create_policy")]
+        self.assertGreaterEqual(before_first_rule.count("get_policy_engine"), 3)
+        self.assertTrue(self.clock.slept)
+
     def test_an_engine_stuck_creating_times_out_rather_than_being_attached(self):
         self.control.active_after = 10_000
         with self.assertRaises(TimeoutError):
