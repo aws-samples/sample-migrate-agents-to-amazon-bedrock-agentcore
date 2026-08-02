@@ -109,10 +109,11 @@ order and passes each stage's result to the next:
    gateway id.
 3. **Create memory** (`examples/memory/configure_memory.py`) — creates the
    AgentCore Memory resource and returns its `memoryId`.
-4. **Build and invoke the agent** (`examples/rebuild/strands_agent.py`) —
-   `build_agent()` wires the memory id into a session manager and appends the
-   gateway-discovered MCP tools (signed with SigV4 by
-   `examples/tools/gateway_mcp_tools.py`).
+4. **Build and invoke the agent** (`examples/stage0_langgraph/agent.py`) —
+   `build_graph()` compiles the stage-0 graph with the gateway-discovered MCP
+   tools (signed with SigV4 by `examples/tools/gateway_mcp_tools.py`, converted
+   to LangChain tools by `examples/stage1_replatform/langchain_mcp_tools.py`) and
+   the AgentCore Memory checkpointer keyed on the memory id.
 
 Run every stage in order, with a teardown at the end:
 
@@ -122,6 +123,13 @@ python -m examples.run_walkthrough \
   --lambda-arn arn:aws:lambda:us-east-1:<account>:function:<tools-function> \
   --teardown
 ```
+
+`--stage` selects one stage instead of all of them. `--stage 0` is the
+self-hosted starting point and creates nothing, so it needs neither ARN;
+`--stage 1` creates the gateway, target and memory above; `--stage 2` is the
+hardening stage and is a declared no-op. The Strands rebuild in
+`examples/rebuild/strands_agent.py` is a separate migration path rather than a
+later stage, and has its own entry point.
 
 Both ARNs are printed by `examples/gateway/lambda_target/deploy.sh`:
 `--lambda-arn` is the function ARN, and `--role-arn` is the gateway execution
