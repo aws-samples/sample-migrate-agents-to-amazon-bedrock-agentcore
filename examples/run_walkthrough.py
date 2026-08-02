@@ -28,7 +28,7 @@ object in this process was holding.
 Stage 2 is the hardening stage. It is a declared no-op here.
 
 The Strands rebuild path is a different migration path rather than a later stage,
-so it keeps its own entry point at examples/rebuild/strands_agent.py.
+so it keeps its own entry point at examples/stage2_rebuild/strands_agent.py.
 
 Pass --teardown to delete the gateway target, the gateway and the memory
 afterward. The Lambda and the two IAM roles come from

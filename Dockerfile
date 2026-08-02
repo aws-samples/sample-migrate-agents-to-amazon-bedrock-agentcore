@@ -16,10 +16,10 @@ COPY examples/ examples/
 # so the stage is a build argument rather than a line you edit:
 #
 #   examples.stage1_replatform.agent_runtime   the LangGraph graph on Runtime
-#   examples.rebuild.strands_agent            the Strands rewrite
+#   examples.stage2_rebuild.strands_agent      the Strands rebuild
 #
 # Build another one with:
-#   finch build --build-arg AGENT_MODULE=examples.rebuild.strands_agent .
+#   finch build --build-arg AGENT_MODULE=examples.stage2_rebuild.strands_agent .
 #
 # Run as a module rather than copied to main.py, because each entrypoint imports
 # its own stage's package from examples/ and -m keeps those imports resolvable

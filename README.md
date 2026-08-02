@@ -32,7 +32,7 @@ examples/
 ├── replatform/
 │   ├── langgraph_agent.py      # Wrap a LangGraph agent for AgentCore Runtime
 │   └── crewai_agent.py         # Wrap a CrewAI agent for AgentCore Runtime
-├── rebuild/
+├── stage2_rebuild/
 │   └── strands_agent.py        # Rebuild with Strands Agents SDK (memory-backed)
 ├── tools/
 │   ├── gateway_mcp_tools.py    # Connect to a gateway as MCP tools (SigV4-signed)
@@ -74,7 +74,7 @@ cd sample-migrate-agents-to-amazon-bedrock-agentcore
 
 ```bash
 source .venv/bin/activate
-python examples/rebuild/strands_agent.py
+python examples/stage2_rebuild/strands_agent.py
 ```
 
 Alternatively, install manually:
@@ -128,8 +128,8 @@ python -m examples.run_walkthrough \
 self-hosted starting point and creates nothing, so it needs neither ARN;
 `--stage 1` creates the gateway, target and memory above; `--stage 2` is the
 hardening stage and is a declared no-op. The Strands rebuild in
-`examples/rebuild/strands_agent.py` is a separate migration path rather than a
-later stage, and has its own entry point.
+`examples/stage2_rebuild/strands_agent.py` is a separate migration path rather
+than a later stage, and has its own entry point.
 
 Both ARNs are printed by `examples/gateway/lambda_target/deploy.sh`:
 `--lambda-arn` is the function ARN, and `--role-arn` is the gateway execution
