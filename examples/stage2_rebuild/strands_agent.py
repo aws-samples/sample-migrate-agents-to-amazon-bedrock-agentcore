@@ -15,6 +15,8 @@ from bedrock_agentcore.memory.integrations.strands.session_manager import (
 from strands import Agent
 from strands.tools import tool
 
+from examples.stage2_rebuild.guardrail import guarded_model
+
 MODEL_ID = "us.anthropic.claude-sonnet-5"
 SYSTEM_PROMPT = "You are a customer support assistant for ExampleCorp."
 
@@ -47,6 +49,7 @@ def build_agent(
     actor_id: Optional[str] = None,
     extra_tools: Optional[Sequence] = None,
     region_name: str = "us-east-1",
+    model=None,
 ) -> Agent:
     """Construct the customer support agent, optionally backed by AgentCore Memory.
 
@@ -59,6 +62,11 @@ def build_agent(
     each one supersedes the local stub of the same name so the agent calls the
     gateway version rather than the placeholder endpoint. Local stubs the gateway
     does not provide are still registered.
+
+    ``model`` overrides the bare model id, and the only reason it exists is
+    guardrail.guarded_model(): a BedrockModel carrying guardrail_id and
+    guardrail_version. Left as None the agent behaves exactly as it did before
+    the guardrail existed.
     """
     tools = [lookup_order, process_return]
     if extra_tools:
@@ -68,7 +76,11 @@ def build_agent(
         superseded = {t.tool_name.split("___")[-1] for t in gateway_tools}
         tools = [t for t in tools if t.tool_name not in superseded] + gateway_tools
 
-    kwargs = {"model": MODEL_ID, "system_prompt": SYSTEM_PROMPT, "tools": tools}
+    kwargs = {
+        "model": model or MODEL_ID,
+        "system_prompt": SYSTEM_PROMPT,
+        "tools": tools,
+    }
 
     if memory_id:
         if not (session_id and actor_id):
@@ -84,11 +96,24 @@ def build_agent(
 
 
 # Runtime agent. Set AGENTCORE_MEMORY_ID (plus AGENTCORE_SESSION_ID /
-# AGENTCORE_ACTOR_ID) to back the deployed agent with AgentCore Memory.
+# AGENTCORE_ACTOR_ID) to back the deployed agent with AgentCore Memory, and
+# BEDROCK_GUARDRAIL_ID (plus BEDROCK_GUARDRAIL_VERSION, default "1") to run its
+# model calls behind the guardrail. Both are configuration: unset, this is the
+# same agent it was before either existed.
+_guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID")
 agent = build_agent(
     memory_id=os.environ.get("AGENTCORE_MEMORY_ID"),
     session_id=os.environ.get("AGENTCORE_SESSION_ID"),
     actor_id=os.environ.get("AGENTCORE_ACTOR_ID"),
+    model=(
+        guarded_model(
+            _guardrail_id,
+            MODEL_ID,
+            guardrail_version=os.environ.get("BEDROCK_GUARDRAIL_VERSION", "1"),
+        )
+        if _guardrail_id
+        else None
+    ),
 )
 
 

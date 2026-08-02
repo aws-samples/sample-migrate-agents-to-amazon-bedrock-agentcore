@@ -33,7 +33,8 @@ examples/
 │   ├── langgraph_agent.py      # Wrap a LangGraph agent for AgentCore Runtime
 │   └── crewai_agent.py         # Wrap a CrewAI agent for AgentCore Runtime
 ├── stage2_rebuild/
-│   └── strands_agent.py        # Rebuild with Strands Agents SDK (memory-backed)
+│   ├── strands_agent.py        # Rebuild with Strands Agents SDK (memory-backed)
+│   └── guardrail.py            # Create, attach and delete the Bedrock Guardrail
 ├── tools/
 │   ├── gateway_mcp_tools.py    # Connect to a gateway as MCP tools (SigV4-signed)
 │   └── inventory_tools.py      # Inventory existing tools before migration
@@ -74,7 +75,7 @@ cd sample-migrate-agents-to-amazon-bedrock-agentcore
 
 ```bash
 source .venv/bin/activate
-python examples/stage2_rebuild/strands_agent.py
+python -m examples.stage2_rebuild.strands_agent
 ```
 
 Alternatively, install manually:
