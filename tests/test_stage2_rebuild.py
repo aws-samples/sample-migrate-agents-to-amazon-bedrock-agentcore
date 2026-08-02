@@ -39,6 +39,7 @@ from botocore.validate import ParamValidator
 from strands.tools.mcp.mcp_agent_tool import MCPAgentTool
 
 from examples import run_walkthrough
+from examples.stage0_langgraph.tools import SUPPORT_TOOLS
 from examples.stage2_rebuild import guardrail as guardrail_module
 from examples.stage2_rebuild.guardrail import (
     BLOCKED_INPUT_MESSAGE,
@@ -287,7 +288,7 @@ class GuardedModelTest(unittest.TestCase):
 
         self.assertEqual(agent.model.get_config()["guardrail_id"], "gr-1")
         registered = sorted(agent.tool_registry.get_all_tools_config())
-        self.assertEqual(registered, [LOOKUP, PROCESS_RETURN])
+        self.assertEqual(registered, ["search_faq", LOOKUP, PROCESS_RETURN])
         # Stage 1's supersede rule still holds: no bare lookup_order stub left.
         self.assertNotIn("lookup_order", registered)
         self.assertNotIn("process_return", registered)
@@ -297,6 +298,30 @@ class GuardedModelTest(unittest.TestCase):
         # change the memory contract.
         with self.assertRaises(ValueError):
             build_agent(memory_id="mem-1")
+
+
+class StageParityTest(unittest.TestCase):
+    """Stage 2 is a rebuild of the same agent, so it cannot offer less."""
+
+    def test_stage2_registers_no_fewer_tools_than_stage1(self):
+        # The defect this catches: stage 2 was rebuilt with lookup_order and
+        # process_return only, so search_faq — a local tool that never moved to the
+        # gateway — was silently dropped and the "rebuilt agent" answered fewer
+        # questions than the one it replaced. Counted against SUPPORT_TOOLS rather
+        # than hard-coded to three, so adding a fourth tool to stages 0/1 without
+        # rebuilding stage 2 fails here too.
+        stage1_names = {t.name for t in SUPPORT_TOOLS}
+        stage2_names = set(build_agent().tool_registry.get_all_tools_config())
+        self.assertGreaterEqual(len(stage2_names), len(stage1_names))
+        self.assertEqual(stage2_names, stage1_names)
+
+    def test_the_gateway_tools_do_not_reduce_the_count(self):
+        # Superseding replaces a stub, it does not remove a capability: the prefixed
+        # gateway names count, so the total still matches stage 1's.
+        agent = build_agent(extra_tools=real_gateway_tools())
+        self.assertEqual(
+            len(agent.tool_registry.get_all_tools_config()), len(SUPPORT_TOOLS)
+        )
 
 
 class CedarRuleTest(unittest.TestCase):

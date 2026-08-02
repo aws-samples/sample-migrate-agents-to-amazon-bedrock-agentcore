@@ -43,6 +43,16 @@ def process_return(order_id: str, reason: str) -> dict:
     return response.json()
 
 
+@tool
+def search_faq(query: str) -> dict:
+    """Search the support knowledge base for a policy or FAQ answer."""
+    response = requests.get(
+        "https://api.example.com/faq/search", params={"q": query}, timeout=30
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def build_agent(
     memory_id: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -61,14 +71,17 @@ def build_agent(
     moved to Gateway. When ``extra_tools`` supplies gateway-discovered MCP tools,
     each one supersedes the local stub of the same name so the agent calls the
     gateway version rather than the placeholder endpoint. Local stubs the gateway
-    does not provide are still registered.
+    does not provide are still registered — which is why search_faq is here.
+    Only lookup_order and process_return moved to the gateway; search_faq stayed
+    local through every stage, and the agent has to keep offering all three or
+    the rebuild has quietly dropped a capability stages 0 and 1 had.
 
     ``model`` overrides the bare model id, and the only reason it exists is
     guardrail.guarded_model(): a BedrockModel carrying guardrail_id and
     guardrail_version. Left as None the agent behaves exactly as it did before
     the guardrail existed.
     """
-    tools = [lookup_order, process_return]
+    tools = [lookup_order, process_return, search_faq]
     if extra_tools:
         gateway_tools = list(extra_tools)
         # Gateway tool names carry a "<targetName>___<toolName>" prefix, e.g.
