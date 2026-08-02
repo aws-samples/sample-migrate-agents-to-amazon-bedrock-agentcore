@@ -18,9 +18,8 @@ CLI documents.
 Evaluation has no synchronous API to call. The policy engine decides at the
 gateway boundary on every tool call, so the way to observe a decision is to make
 the call: call_tool_through_gateway does that and reports whether the tool ran or
-the request was refused. That is what the walkthrough uses to show one caller
-being permitted lookup_order and refused process_return on an order it does not
-own.
+the request was refused. That is what the walkthrough uses to show the read-only
+caller being permitted lookup_order and refused process_return.
 
 Deleting is the other half of this file. A policy engine left attached to a
 deleted gateway is a resource nobody is looking at, so teardown deletes the
@@ -45,8 +44,15 @@ POLICY_ENGINE_NAME = "SupportToolsPolicyEngine"
 # Substituted into the Cedar text at registration time. Values, not names: the
 # rules cannot be created until the gateway they name exists.
 GATEWAY_ARN_PLACEHOLDER = "<GATEWAY_ARN>"
-OWNER_PLACEHOLDER = "<OWNER_PRINCIPAL_ARN>"
-ORDER_PLACEHOLDER = "<OWNED_ORDER_ID>"
+READ_ONLY_PLACEHOLDER = "<READ_ONLY_PRINCIPAL_ARN>"
+SUPPORT_AGENT_PLACEHOLDER = "<SUPPORT_AGENT_PRINCIPAL_ARN>"
+
+# The privileged identity in the shipped rules. The walkthrough runs as the
+# read-only caller and deliberately does not hold this role: that is what makes
+# its process_return call a policy decision rather than a permission it happens
+# to have. Cedar does not require the principal to exist — measured — so nothing
+# creates it.
+SUPPORT_AGENT_ROLE_NAME = "SupportEscalationRole"
 
 # One AgentCore policy per marked block in the .cedar file.
 _POLICY_MARKER = re.compile(r"^// === policy: (\w+) ===$", re.MULTILINE)
@@ -76,23 +82,23 @@ def read_policy_blocks(path: Path = POLICY_FILE) -> List[Tuple[str, str]]:
 
 def render_policies(
     gateway_arn: str,
-    owner_principal_arn: str,
-    owned_order_id: str,
+    read_only_principal_arn: str,
+    support_agent_principal_arn: str,
     path: Path = POLICY_FILE,
 ) -> List[Tuple[str, str]]:
     """Substitute the three placeholders and return the ready-to-create rules.
 
     Raises rather than shipping a half-substituted policy. A leftover placeholder
     would either fail Cedar validation or, worse, create a rule that matches a
-    principal literally named "<OWNER_PRINCIPAL_ARN>"; an empty substitution is
-    the quieter version of the same bug, because permit ... when
-    { context.input.order_id == "" } is a rule that matches nothing and, under
-    default-deny, refuses every return without anything looking broken.
+    principal literally named "<READ_ONLY_PRINCIPAL_ARN>"; an empty substitution
+    is the quieter version of the same bug, because a permit for the principal
+    named "" matches nobody and, under default-deny, refuses every call the rule
+    was meant to allow without anything looking broken.
     """
     substitutions = {
         GATEWAY_ARN_PLACEHOLDER: gateway_arn,
-        OWNER_PLACEHOLDER: owner_principal_arn,
-        ORDER_PLACEHOLDER: owned_order_id,
+        READ_ONLY_PLACEHOLDER: read_only_principal_arn,
+        SUPPORT_AGENT_PLACEHOLDER: support_agent_principal_arn,
     }
     empty = [p for p, value in substitutions.items() if not value]
     if empty:
@@ -109,7 +115,7 @@ def render_policies(
 
 
 def caller_principal(region_name: str = "us-east-1") -> str:
-    """The Cedar entity id for the current caller, for the ownership rule.
+    """The Cedar entity id for the current caller: the read-only rule's principal.
 
     GetCallerIdentity returns an assumed-role ARN with the session name appended,
     such as arn:aws:sts::123456789012:assumed-role/MyRole/my-session, but the
@@ -121,6 +127,18 @@ def caller_principal(region_name: str = "us-east-1") -> str:
     if ":assumed-role/" in arn and len(parts) > 2:
         return "/".join(parts[:2])
     return arn
+
+
+def support_agent_principal(region_name: str = "us-east-1") -> str:
+    """The Cedar entity id for the privileged identity, in the caller's account.
+
+    Same assumed-role shape as caller_principal returns, because that is the id an
+    AWS_IAM gateway presents for a role.
+    """
+    account = boto3.client("sts", region_name=region_name).get_caller_identity()[
+        "Account"
+    ]
+    return f"arn:aws:sts::{account}:assumed-role/{SUPPORT_AGENT_ROLE_NAME}"
 
 
 def _wait_until_active(get, timeout: int = 300, **kwargs) -> dict:
@@ -242,8 +260,8 @@ def attach_to_gateway(
 def register(
     gateway_id: str,
     gateway_arn: str,
-    owner_principal_arn: str,
-    owned_order_id: str,
+    read_only_principal_arn: str,
+    support_agent_principal_arn: str,
     mode: str = "ENFORCE",
     region_name: str = "us-east-1",
 ) -> Tuple[str, Dict[str, str]]:
@@ -251,7 +269,9 @@ def register(
     engine_id, engine_arn = create_policy_engine(region_name=region_name)
     policies = create_policies(
         engine_id,
-        render_policies(gateway_arn, owner_principal_arn, owned_order_id),
+        render_policies(
+            gateway_arn, read_only_principal_arn, support_agent_principal_arn
+        ),
         region_name,
     )
     attach_to_gateway(gateway_id, engine_arn, mode, region_name)
@@ -388,14 +408,17 @@ def main() -> None:
         help="Gateway ARN named by the Cedar resource clause (or set GATEWAY_ARN).",
     )
     parser.add_argument(
-        "--owner-principal",
-        default=os.environ.get("POLICY_OWNER_PRINCIPAL"),
-        help="Cedar principal that owns the order (default: the current caller).",
+        "--read-only-principal",
+        default=os.environ.get("POLICY_READ_ONLY_PRINCIPAL"),
+        help="Cedar principal allowed lookup_order (default: the current caller).",
     )
     parser.add_argument(
-        "--owned-order-id",
-        default=os.environ.get("POLICY_OWNED_ORDER_ID", "12345"),
-        help="Order the owner may return (default: 12345).",
+        "--support-agent-principal",
+        default=os.environ.get("POLICY_SUPPORT_AGENT_PRINCIPAL"),
+        help=(
+            "Cedar principal also allowed process_return "
+            f"(default: the {SUPPORT_AGENT_ROLE_NAME} role in this account)."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -416,8 +439,8 @@ def main() -> None:
     register(
         args.gateway_id,
         args.gateway_arn,
-        args.owner_principal or caller_principal(args.region),
-        args.owned_order_id,
+        args.read_only_principal or caller_principal(args.region),
+        args.support_agent_principal or support_agent_principal(args.region),
         args.mode,
         args.region,
     )

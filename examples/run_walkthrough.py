@@ -77,6 +77,7 @@ from examples.stage2_rebuild.policy.attach_policy import (
     delete_policies,
     delete_policy_engine,
     register,
+    support_agent_principal,
 )
 from examples.stage2_rebuild.strands_agent import build_agent
 from examples.tools.gateway_mcp_tools import build_mcp_client
@@ -88,10 +89,10 @@ MODEL_ID = "us.anthropic.claude-sonnet-5"
 # resources rather than creating its own.
 AGENTCORE_STAGES = ("1", "2", "all")
 
-# The order stage 2's Cedar rules say this caller owns, and the one they say it
-# does not. The second is the deny the walkthrough demonstrates.
-OWNED_ORDER_ID = "12345"
-OTHER_ORDER_ID = "99999"
+# The order the demo calls name. Stage 2's Cedar rules scope tools to callers, not
+# orders, so one order id is enough: the same caller asking for the same order is
+# allowed to look it up and refused a return on it.
+DEMO_ORDER_ID = "12345"
 
 
 def _wait_for_target_deletion(
@@ -352,10 +353,12 @@ def run_stage2(
     guardrail_id, guardrail_version = create_guardrail(region_name=region_name)
     created["guardrail_id"] = guardrail_id
 
-    owner = caller_principal(region_name)
-    print(f"policy owner principal: {owner}")
+    read_only = caller_principal(region_name)
+    privileged = support_agent_principal(region_name)
+    print(f"policy read-only principal: {read_only}")
+    print(f"policy support-agent principal: {privileged} (not held by this caller)")
     engine_id, policies = register(
-        gateway_id, gateway_arn, owner, OWNED_ORDER_ID, "ENFORCE", region_name
+        gateway_id, gateway_arn, read_only, privileged, "ENFORCE", region_name
     )
     created["policy_engine_id"] = engine_id
     created["policy_ids"] = list(policies.values())
@@ -376,7 +379,7 @@ def run_stage2(
         # get_all_tools_config() is keyed by tool name, so the keys are the names.
         print(f"tools: {sorted(agent.tool_registry.get_all_tools_config())}")
 
-        _ask_strands(agent, f"Hi, I'm Dana. Where is my order {OWNED_ORDER_ID}?")
+        _ask_strands(agent, f"Hi, I'm Dana. Where is my order {DEMO_ORDER_ID}?")
         # The guardrail's denied topic, not a prompt instruction: the reply is
         # blockedInputMessaging, produced before the model saw the question.
         _ask_strands(
@@ -387,28 +390,22 @@ def run_stage2(
         mcp_client.stop(None, None, None)
 
     # Cedar decides at the gateway, so the way to read the decision is to make the
-    # call. Same caller, same tool, two different orders.
+    # call. Same caller, same order, two different tools: the read is permitted and
+    # the write is not, because only the support-agent role is permitted the write.
     allowed, text = call_tool_through_gateway(
         gateway_url,
         "supportTools___lookup_order",
-        {"order_id": OTHER_ORDER_ID},
+        {"order_id": DEMO_ORDER_ID},
         region_name,
     )
-    print(f"\nlookup_order({OTHER_ORDER_ID}) allowed={allowed}: {text[:120]}")
+    print(f"\nlookup_order({DEMO_ORDER_ID}) allowed={allowed}: {text[:120]}")
     allowed, text = call_tool_through_gateway(
         gateway_url,
         "supportTools___process_return",
-        {"order_id": OTHER_ORDER_ID, "reason": "changed my mind"},
+        {"order_id": DEMO_ORDER_ID, "reason": "damaged in transit"},
         region_name,
     )
-    print(f"process_return({OTHER_ORDER_ID}) allowed={allowed}: {text[:120]}")
-    allowed, text = call_tool_through_gateway(
-        gateway_url,
-        "supportTools___process_return",
-        {"order_id": OWNED_ORDER_ID, "reason": "damaged in transit"},
-        region_name,
-    )
-    print(f"process_return({OWNED_ORDER_ID}) allowed={allowed}: {text[:120]}")
+    print(f"process_return({DEMO_ORDER_ID}) allowed={allowed}: {text[:120]}")
 
 
 def run(args: argparse.Namespace) -> None:

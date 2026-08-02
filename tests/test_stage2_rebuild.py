@@ -58,6 +58,7 @@ from examples.stage2_rebuild.policy.attach_policy import (
     read_policy_blocks,
     register,
     render_policies,
+    support_agent_principal,
 )
 from examples.stage2_rebuild.strands_agent import MODEL_ID, build_agent
 from tests import fake_cedar
@@ -77,10 +78,9 @@ GATEWAY_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/gw-abc12
 OTHER_GATEWAY_ARN = (
     "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/gw-someone-else"
 )
-OWNER = "arn:aws:sts::123456789012:assumed-role/SupportAgentRole"
+READ_ONLY = "arn:aws:sts::123456789012:assumed-role/SupportAgentRole"
+SUPPORT_AGENT = "arn:aws:sts::123456789012:assumed-role/SupportEscalationRole"
 STRANGER = "arn:aws:sts::123456789012:assumed-role/SomeOtherRole"
-OWNED_ORDER = "12345"
-OTHER_ORDER = "99999"
 LOOKUP = "supportTools___lookup_order"
 PROCESS_RETURN = "supportTools___process_return"
 
@@ -304,60 +304,48 @@ class CedarRuleTest(unittest.TestCase):
         self.statements = fake_cedar.parse(
             "\n".join(
                 statement
-                for _, statement in render_policies(GATEWAY_ARN, OWNER, OWNED_ORDER)
+                for _, statement in render_policies(
+                    GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT
+                )
             )
         )
 
-    def allowed(self, principal, action, order_id, gateway_arn=GATEWAY_ARN):
+    def allowed(self, principal, action, gateway_arn=GATEWAY_ARN):
         return fake_cedar.is_authorized(
             self.statements,
             Entity("AgentCore::IamEntity", principal),
             action,
             Entity("AgentCore::Gateway", gateway_arn),
-            {"order_id": order_id, "reason": "damaged in transit"},
         )
 
-    def test_process_return_is_denied_for_an_order_the_caller_does_not_own(self):
+    def test_process_return_is_denied_for_the_read_only_caller(self):
         # The stage-2 claim, and the one no prompt can make reliable.
-        self.assertFalse(self.allowed(OWNER, PROCESS_RETURN, OTHER_ORDER))
-
-    def test_process_return_is_denied_for_a_different_caller(self):
-        self.assertFalse(self.allowed(STRANGER, PROCESS_RETURN, OWNED_ORDER))
-
-    def test_process_return_is_permitted_for_the_owner_of_the_order(self):
-        self.assertTrue(self.allowed(OWNER, PROCESS_RETURN, OWNED_ORDER))
+        self.assertFalse(self.allowed(READ_ONLY, PROCESS_RETURN))
 
     def test_lookup_order_still_succeeds_for_the_denied_caller(self):
         # The deny has to be specific to the tool, or stage 2 has broken stage 1's
         # agent rather than secured it.
-        self.assertTrue(self.allowed(OWNER, LOOKUP, OTHER_ORDER))
-        self.assertTrue(self.allowed(STRANGER, LOOKUP, OTHER_ORDER))
+        self.assertTrue(self.allowed(READ_ONLY, LOOKUP))
+
+    def test_the_support_agent_is_permitted_both_tools(self):
+        # One permit with an action list, so the privileged identity does not lose
+        # the read it already had when it gained the write.
+        self.assertTrue(self.allowed(SUPPORT_AGENT, PROCESS_RETURN))
+        self.assertTrue(self.allowed(SUPPORT_AGENT, LOOKUP))
+
+    def test_a_caller_named_by_neither_rule_is_denied_both_tools(self):
+        self.assertFalse(self.allowed(STRANGER, LOOKUP))
+        self.assertFalse(self.allowed(STRANGER, PROCESS_RETURN))
 
     def test_an_unknown_tool_is_denied_by_default(self):
-        self.assertFalse(self.allowed(OWNER, "supportTools___refund_order", OWNED_ORDER))
+        self.assertFalse(self.allowed(SUPPORT_AGENT, "supportTools___refund_order"))
 
     def test_the_rules_only_apply_to_the_gateway_they_name(self):
         # Cedar rejects a wildcard resource, so the ARN substitution is the thing
         # that keeps these rules off another team's gateway.
+        self.assertFalse(self.allowed(READ_ONLY, LOOKUP, gateway_arn=OTHER_GATEWAY_ARN))
         self.assertFalse(
-            self.allowed(OWNER, LOOKUP, OWNED_ORDER, gateway_arn=OTHER_GATEWAY_ARN)
-        )
-        self.assertFalse(
-            self.allowed(
-                OWNER, PROCESS_RETURN, OWNED_ORDER, gateway_arn=OTHER_GATEWAY_ARN
-            )
-        )
-
-    def test_a_missing_order_id_argument_is_denied_rather_than_permitted(self):
-        # Cedar errors on a missing attribute and an errored policy grants nothing.
-        self.assertFalse(
-            fake_cedar.is_authorized(
-                self.statements,
-                Entity("AgentCore::IamEntity", OWNER),
-                PROCESS_RETURN,
-                Entity("AgentCore::Gateway", GATEWAY_ARN),
-                {"reason": "no order id at all"},
-            )
+            self.allowed(SUPPORT_AGENT, PROCESS_RETURN, gateway_arn=OTHER_GATEWAY_ARN)
         )
 
     def test_an_oauth_principal_does_not_match_the_iam_rules(self):
@@ -366,10 +354,9 @@ class CedarRuleTest(unittest.TestCase):
         self.assertFalse(
             fake_cedar.is_authorized(
                 self.statements,
-                Entity("AgentCore::OAuthUser", OWNER),
+                Entity("AgentCore::OAuthUser", READ_ONLY),
                 LOOKUP,
                 Entity("AgentCore::Gateway", GATEWAY_ARN),
-                {"order_id": OWNED_ORDER},
             )
         )
 
@@ -380,7 +367,7 @@ class CedarEvaluatorFidelityTest(unittest.TestCase):
     def test_no_statements_is_a_deny(self):
         self.assertFalse(
             fake_cedar.is_authorized(
-                [], Entity("AgentCore::IamEntity", OWNER), LOOKUP,
+                [], Entity("AgentCore::IamEntity", READ_ONLY), LOOKUP,
                 Entity("AgentCore::Gateway", GATEWAY_ARN),
             )
         )
@@ -397,7 +384,7 @@ class CedarEvaluatorFidelityTest(unittest.TestCase):
         gateway = Entity("AgentCore::Gateway", GATEWAY_ARN)
         self.assertTrue(
             fake_cedar.is_authorized(
-                statements, Entity("AgentCore::IamEntity", OWNER), LOOKUP, gateway
+                statements, Entity("AgentCore::IamEntity", READ_ONLY), LOOKUP, gateway
             )
         )
         self.assertFalse(
@@ -408,14 +395,22 @@ class CedarEvaluatorFidelityTest(unittest.TestCase):
 
     def test_cedar_outside_the_subset_raises_rather_than_being_ignored(self):
         # The failure mode that matters: a rule this cannot evaluate must break the
-        # test rather than quietly evaluate to "permitted".
+        # test rather than quietly evaluate to "permitted". A when clause is in this
+        # list because the shipped rules have none: if one is ever added, the rule
+        # stops being evaluable here and has to be proven live instead.
         for text in (
             'permit(principal, action, resource);',
-            f'permit(principal is AgentCore::IamEntity, '
-            f'action in [AgentCore::Action::"{LOOKUP}"], resource);',
+            f'permit(principal in AgentCore::Group::"support", '
+            f'action == AgentCore::Action::"{LOOKUP}", resource);',
             f'permit(principal is AgentCore::IamEntity, '
             f'action == AgentCore::Action::"{LOOKUP}", resource) '
             f'unless {{ context.input.order_id == "1" }};',
+            f'permit(principal == AgentCore::IamEntity::"{READ_ONLY}", '
+            f'action == AgentCore::Action::"{LOOKUP}", '
+            f'resource == AgentCore::Gateway::"{GATEWAY_ARN}") '
+            f'when {{ context.input.order_id != "" }};',
+            f'permit(principal is AgentCore::IamEntity, '
+            f'action in [AgentCore::Action::"{LOOKUP}", "not-an-action"], resource);',
         ):
             with self.subTest(text=text):
                 with self.assertRaises(ValueError):
@@ -431,14 +426,16 @@ class PolicyRenderingTest(unittest.TestCase):
 
     def test_each_marked_block_becomes_one_named_policy(self):
         names = [name for name, _ in read_policy_blocks()]
-        self.assertEqual(names, ["LookupOrderForAnyCaller", "ProcessReturnForOwnerOnly"])
+        self.assertEqual(
+            names, ["LookupOrderForReadOnlyCaller", "LookupAndReturnForSupportAgent"]
+        )
         # AgentCore requires [A-Za-z][A-Za-z0-9_]* and at most 48 characters.
         for name in names:
             self.assertRegex(name, r"^[A-Za-z][A-Za-z0-9_]*$")
             self.assertLessEqual(len(name), 48)
 
     def test_rendering_substitutes_every_placeholder(self):
-        for name, statement in render_policies(GATEWAY_ARN, OWNER, OWNED_ORDER):
+        for name, statement in render_policies(GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT):
             with self.subTest(policy=name):
                 self.assertNotRegex(statement, r"<[A-Z_]+>")
                 self.assertIn(GATEWAY_ARN, statement)
@@ -446,27 +443,40 @@ class PolicyRenderingTest(unittest.TestCase):
                 self.assertLessEqual(len(statement), 10_000)
 
     def test_an_empty_substitution_is_refused(self):
-        # The quiet bug this guard exists for: an empty order id renders
-        # context.input.order_id == "", a rule that matches nothing, so every
-        # return is denied and nothing looks broken.
+        # The quiet bug this guard exists for: an empty principal renders a permit
+        # for the caller named "", which matches nobody, so every call the rule was
+        # meant to allow is denied and nothing looks broken.
         for args in (
-            ("", OWNER, OWNED_ORDER),
-            (GATEWAY_ARN, "", OWNED_ORDER),
-            (GATEWAY_ARN, OWNER, ""),
+            ("", READ_ONLY, SUPPORT_AGENT),
+            (GATEWAY_ARN, "", SUPPORT_AGENT),
+            (GATEWAY_ARN, READ_ONLY, ""),
         ):
             with self.subTest(args=args):
                 with self.assertRaises(ValueError):
                     render_policies(*args)
 
-    def test_the_owner_rule_is_conditioned_on_the_tool_input(self):
-        rules = dict(render_policies(GATEWAY_ARN, OWNER, OWNED_ORDER))
-        self.assertIn("context.input.order_id", rules["ProcessReturnForOwnerOnly"])
-        self.assertIn(OWNER, rules["ProcessReturnForOwnerOnly"])
-        # The lookup rule names no caller, but it cannot be unconditioned either:
-        # the service rejects an unconditioned permit as overly permissive, so it
-        # carries the weakest condition that validates.
-        self.assertIn('context.input.order_id != ""', rules["LookupOrderForAnyCaller"])
-        self.assertNotIn(OWNER, rules["LookupOrderForAnyCaller"])
+    def test_each_rule_names_one_principal_and_carries_no_condition(self):
+        # The whole control is the principal ARN: measured live, a permit naming a
+        # specific principal passes FAIL_ON_ANY_FINDINGS with no when clause, while
+        # a permit naming a principal *type* is refused as overly permissive. A
+        # condition reappearing here would be a rule fake_cedar can no longer
+        # evaluate, so this is the assertion that keeps the file inside the subset.
+        rules = dict(render_policies(GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT))
+        for name, statement in rules.items():
+            with self.subTest(policy=name):
+                # Each block keeps its own comments, and those comments discuss the
+                # absence of a when clause, so the assertion has to read the Cedar.
+                cedar = "\n".join(
+                    line for line in statement.splitlines()
+                    if not line.lstrip().startswith("//")
+                )
+                self.assertNotIn("when", cedar)
+                self.assertNotIn("context.input", cedar)
+                self.assertIn("principal == AgentCore::IamEntity::", cedar)
+        self.assertIn(READ_ONLY, rules["LookupOrderForReadOnlyCaller"])
+        self.assertNotIn(SUPPORT_AGENT, rules["LookupOrderForReadOnlyCaller"])
+        self.assertIn(SUPPORT_AGENT, rules["LookupAndReturnForSupportAgent"])
+        self.assertNotIn(READ_ONLY, rules["LookupAndReturnForSupportAgent"])
 
 
 class PolicyRegistrationTest(unittest.TestCase):
@@ -491,11 +501,12 @@ class PolicyRegistrationTest(unittest.TestCase):
 
     def test_register_creates_one_policy_per_rule_and_attaches_the_engine(self):
         engine_id, policies = register(
-            "gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "ENFORCE", "us-east-1"
+            "gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1"
         )
 
         self.assertEqual(
-            sorted(policies), ["LookupOrderForAnyCaller", "ProcessReturnForOwnerOnly"]
+            sorted(policies),
+            ["LookupAndReturnForSupportAgent", "LookupOrderForReadOnlyCaller"],
         )
         self.assertTrue(engine_id.startswith("policy-engine-"))
         self.assertEqual(self.operations().count("create_policy_engine"), 1)
@@ -513,21 +524,22 @@ class PolicyRegistrationTest(unittest.TestCase):
         )
 
     def test_the_rendered_cedar_is_what_gets_created(self):
-        register("gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "ENFORCE", "us-east-1")
+        register("gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1")
 
         statements = {
             params["name"]: params["definition"]["cedar"]["statement"]
             for params in self.created_policies()
         }
-        self.assertIn(GATEWAY_ARN, statements["LookupOrderForAnyCaller"])
-        self.assertIn(OWNER, statements["ProcessReturnForOwnerOnly"])
-        self.assertIn(
-            f'context.input.order_id == "{OWNED_ORDER}"',
-            statements["ProcessReturnForOwnerOnly"],
-        )
+        self.assertIn(GATEWAY_ARN, statements["LookupOrderForReadOnlyCaller"])
+        self.assertIn(READ_ONLY, statements["LookupOrderForReadOnlyCaller"])
+        self.assertIn(SUPPORT_AGENT, statements["LookupAndReturnForSupportAgent"])
+        # The privileged rule is the only one naming process_return; that is where
+        # the read-only caller's deny comes from.
+        self.assertNotIn(PROCESS_RETURN, statements["LookupOrderForReadOnlyCaller"])
+        self.assertIn(PROCESS_RETURN, statements["LookupAndReturnForSupportAgent"])
 
     def test_create_policy_requests_are_valid_requests(self):
-        register("gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "ENFORCE", "us-east-1")
+        register("gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1")
         for params in self.created_policies():
             with self.subTest(policy=params["name"]):
                 self.assertTrue(valid_request("bedrock-agentcore-control", "CreatePolicy", params))
@@ -535,7 +547,7 @@ class PolicyRegistrationTest(unittest.TestCase):
     def test_the_attach_echoes_the_gateways_authentication_back(self):
         # UpdateGateway is a full replacement. Omitting authorizerType or roleArn
         # is an update that silently rewrites who may call the gateway.
-        register("gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "ENFORCE", "us-east-1")
+        register("gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1")
 
         update = [p for name, p in self.control.calls if name == "update_gateway"][0]
         self.assertEqual(update["authorizerType"], "AWS_IAM")
@@ -545,18 +557,18 @@ class PolicyRegistrationTest(unittest.TestCase):
         self.assertTrue(valid_request("bedrock-agentcore-control", "UpdateGateway", update))
 
     def test_log_only_is_available_for_a_first_attach(self):
-        register("gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "LOG_ONLY", "us-east-1")
+        register("gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "LOG_ONLY", "us-east-1")
         update = [p for name, p in self.control.calls if name == "update_gateway"][0]
         self.assertEqual(update["policyEngineConfiguration"]["mode"], "LOG_ONLY")
 
     def test_an_existing_engine_is_reused_rather_than_duplicated(self):
         first, _ = register(
-            "gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "ENFORCE", "us-east-1"
+            "gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1"
         )
         self.control.calls.clear()
 
         second, _ = register(
-            "gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "ENFORCE", "us-east-1"
+            "gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1"
         )
 
         self.assertEqual(second, first)
@@ -569,7 +581,7 @@ class PolicyRegistrationTest(unittest.TestCase):
         # rule rather than being implied by the policy waits after it.
         self.control.active_after = 2
 
-        register("gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "ENFORCE", "us-east-1")
+        register("gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1")
 
         operations = self.operations()
         before_first_rule = operations[: operations.index("create_policy")]
@@ -579,17 +591,24 @@ class PolicyRegistrationTest(unittest.TestCase):
     def test_an_engine_stuck_creating_times_out_rather_than_being_attached(self):
         self.control.active_after = 10_000
         with self.assertRaises(TimeoutError):
-            register("gw-abc123", GATEWAY_ARN, OWNER, OWNED_ORDER, "ENFORCE", "us-east-1")
+            register("gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1")
         self.assertNotIn("update_gateway", self.operations())
 
     def test_the_caller_principal_drops_the_session_name(self):
         # A session name changes per assume-role call, so a principal == rule
         # written with one attached would stop matching on the next run.
-        self.assertEqual(caller_principal("us-east-1"), OWNER)
+        self.assertEqual(caller_principal("us-east-1"), READ_ONLY)
 
     def test_a_plain_role_or_user_arn_is_left_alone(self):
         self.sts.arn = "arn:aws:iam::123456789012:user/dana"
         self.assertEqual(caller_principal("us-east-1"), "arn:aws:iam::123456789012:user/dana")
+
+    def test_the_support_agent_principal_is_a_role_the_caller_is_not(self):
+        # The two principals have to differ or the deny cannot be observed: if the
+        # walkthrough ran as the privileged role, its process_return call would be
+        # permitted and the demo would prove nothing.
+        self.assertEqual(support_agent_principal("us-east-1"), SUPPORT_AGENT)
+        self.assertNotEqual(support_agent_principal("us-east-1"), caller_principal("us-east-1"))
 
 
 class PolicyDeletionTest(unittest.TestCase):
