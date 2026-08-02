@@ -33,14 +33,18 @@ from langgraph.checkpoint.base import (
 # internally, and treats its own max_results as a total cap across pages. So one
 # get_tuple costs ceil(min(N, MAX_EVENTS) / 100) ListEvents calls, where N is
 # every event in the thread. Every superstep appends one more, and there is no
-# trim primitive: the cost of reading a thread grows linearly with its length.
+# trim primitive: the cost of reading a thread grows linearly with its length. Live
+# counts match: 1 ListEvents call at N=11, and 2 at N=121.
 MAX_EVENTS = 10000
 
 # ListEvents has no sort parameter. Its input members are exactly memoryId,
 # sessionId, actorId, includePayloads, filter, maxResults and nextToken; the
 # service model is silent on ordering and so are the public docs, while the SDK
 # contradicts itself — the list_events docstring says chronological, whereas
-# get_last_k_turns and the Strands session manager both behave newest-first.
+# get_last_k_turns and the Strands session manager both behave newest-first. A live
+# read of a 121-event stream in us-east-1 came back newest-first, so the docstring
+# at bedrock_agentcore/memory/client.py:841 is wrong today; that is one region on
+# one day, not a contract, which is the point.
 # Therefore this class never trusts the returned order. Every selection below is
 # made client-side on checkpoint_id, which is a uuid6 and so sorts by time as a
 # string. Past MAX_EVENTS the scan silently truncates, and with no ordering
@@ -51,9 +55,12 @@ MAX_EVENTS = 10000
 # only indexed keys are usable in metadata filters, examples/memory/
 # configure_memory.py declares none, and declaring one later is a one-way door
 # because indexed keys cannot be removed. And MemoryDocument is a sensitive shape
-# with no documented size constraint, so the ceiling on a serialised
-# channel_values blob is unknown; it has not been established here, and guessing a
-# number would be worse than saying so.
+# with no documented size constraint. A blob event of 4 MiB (4194304 bytes) was
+# written and read back byte-identical in us-east-1, as were 10 KB, 100 KB, 500 KB
+# and 1 MiB, so the ceiling is above 4 MiB rather than at some small value — but it
+# is still undocumented, so treat 4 MiB as the largest size measured, not as a
+# supported limit. A checkpoint that large is a problem of its own anyway: the whole
+# blob is rewritten every superstep and re-read on every get_tuple.
 
 
 def _event_order(event_id):
