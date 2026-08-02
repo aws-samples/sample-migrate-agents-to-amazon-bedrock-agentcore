@@ -373,7 +373,8 @@ def run_stage2(
                 guardrail_id, MODEL_ID, guardrail_version, region_name
             ),
         )
-        print(f"tools: {[t.tool_name for t in agent.tool_registry.get_all_tools_config()]}")
+        # get_all_tools_config() is keyed by tool name, so the keys are the names.
+        print(f"tools: {sorted(agent.tool_registry.get_all_tools_config())}")
 
         _ask_strands(agent, f"Hi, I'm Dana. Where is my order {OWNED_ORDER_ID}?")
         # The guardrail's denied topic, not a prompt instruction: the reply is
