@@ -50,13 +50,15 @@ class FakeMemoryDataPlane:
         # [0-9]+, so a test can turn the padding off.
         self.zero_pad = zero_pad
         self.events = {}  # (memory_id, actor_id, session_id) -> list of events
-        self.stamped = 0  # events created, across every stream: the clock
+        # The stamp for the next event, shared by every stream. Settable so a test
+        # can start it just below a digit-count boundary.
+        self.clock = FIRST_EVENT_MILLIS
         self.page_reads = 0
         self.list_calls = []
 
     def _next_event_id(self):
-        millis = FIRST_EVENT_MILLIS + self.stamped
-        self.stamped += 1
+        millis = self.clock
+        self.clock += 1
         return f"{millis:019d}#deadbeef" if self.zero_pad else f"{millis}#deadbeef"
 
     def create_blob_event(

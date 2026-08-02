@@ -335,9 +335,12 @@ class PendingWritesTest(SaverTestCase):
 
     def test_unpadded_event_ids_still_order_correctly(self):
         # EventId's pattern is [0-9]+#[a-fA-F0-9]+. The observed ids are
-        # zero-padded, but nothing in the model says they must be, so ordering
-        # must survive comparing 999 against 1000.
+        # zero-padded, but nothing in the model says they must be, so ordering has
+        # to survive comparing 999 against 1000 — where a string comparison gets
+        # the answer backwards. The clock is set to straddle that boundary
+        # deliberately; without it this test passes against a string sort too.
         self.plane.zero_pad = False
+        self.plane.clock = 999
         self.saver.put_writes(self.config, [("messages", "first")], "task-a")
         self.saver.put_writes(self.config, [("messages", "second")], "task-a")
 
