@@ -36,5 +36,6 @@ def run_validation(agent=None):
 
 if __name__ == "__main__":
     # Replace None with your agent instance:
-    # from examples.rebuild.strands_agent import agent
+    # from examples.stage2_rebuild.strands_agent import build_agent
+    # run_validation(agent=build_agent())
     run_validation(agent=None)

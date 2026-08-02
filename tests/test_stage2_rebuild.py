@@ -30,8 +30,11 @@ Run from the repository root:
 """
 
 import contextlib
+import importlib
 import io
+import os
 import unittest
+import unittest.mock
 
 import botocore.session
 import mcp.types as mcp_types
@@ -60,6 +63,7 @@ from examples.stage2_rebuild.policy.attach_policy import (
     render_policies,
     support_agent_principal,
 )
+from examples.stage2_rebuild import strands_agent
 from examples.stage2_rebuild.strands_agent import MODEL_ID, build_agent
 from tests import fake_cedar
 from tests.fake_cedar import Entity
@@ -93,6 +97,13 @@ def valid_request(service, operation, params):
     if report.has_errors():
         raise AssertionError(report.generate_report())
     return True
+
+
+class FakeContext:
+    """The one field of Runtime's RequestContext the entrypoint reads."""
+
+    def __init__(self, session_id):
+        self.session_id = session_id
 
 
 def real_gateway_tools(client=None):
@@ -322,6 +333,72 @@ class StageParityTest(unittest.TestCase):
         self.assertEqual(
             len(agent.tool_registry.get_all_tools_config()), len(SUPPORT_TOOLS)
         )
+
+
+class RuntimeEntrypointTest(unittest.TestCase):
+    """Importing the Runtime module, and where the session id comes from."""
+
+    def setUp(self):
+        strands_agent._agents.clear()
+        self.addCleanup(strands_agent._agents.clear)
+
+    def test_the_module_imports_in_the_environment_runtime_provides(self):
+        # The defect this catches: the agent was built at import time from
+        # AGENTCORE_MEMORY_ID / AGENTCORE_ACTOR_ID / AGENTCORE_SESSION_ID, and
+        # agent_runtime.py:85-87 sets the first two and never the third. Importing
+        # the module in the environment it is deployed into raised ValueError, so
+        # the container could not start. Nothing is built until an invocation.
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"AGENTCORE_MEMORY_ID": "mem-1", "AGENTCORE_ACTOR_ID": "customer-1"},
+        ):
+            reloaded = importlib.reload(strands_agent)
+        self.addCleanup(importlib.reload, strands_agent)
+        self.assertFalse(reloaded._agents)
+        self.assertTrue(callable(reloaded.support_agent))
+
+    def test_the_entrypoint_uses_the_callers_session_id(self):
+        # The other half of the same defect: the entrypoint ignored
+        # context.session_id and used whatever AGENTCORE_SESSION_ID held, so every
+        # caller shared one memory session.
+        captured = []
+        self._patch_build(captured)
+        strands_agent.agent_invocation({"prompt": "hi"}, FakeContext("session-abc"))
+        self.assertEqual([kwargs["session_id"] for kwargs in captured], ["session-abc"])
+
+    def test_two_callers_do_not_share_one_agent(self):
+        # A Strands session manager is pinned to one session_id at construction, so
+        # a single process-wide agent would file both callers' turns under the first
+        # session id to arrive.
+        captured = []
+        self._patch_build(captured)
+        strands_agent.agent_invocation({"prompt": "hi"}, FakeContext("session-a"))
+        strands_agent.agent_invocation({"prompt": "hi"}, FakeContext("session-b"))
+        strands_agent.agent_invocation({"prompt": "hi"}, FakeContext("session-a"))
+        # Three invocations, two sessions, two agents: cached per session, not
+        # rebuilt per turn.
+        self.assertEqual(
+            [kwargs["session_id"] for kwargs in captured], ["session-a", "session-b"]
+        )
+
+    def test_a_missing_session_id_falls_back_rather_than_failing(self):
+        # RequestContext.session_id is Optional and is None on a local invoke.
+        captured = []
+        self._patch_build(captured)
+        strands_agent.agent_invocation({"prompt": "hi"}, FakeContext(None))
+        self.assertEqual(captured[0]["session_id"], "local-session")
+
+    def _patch_build(self, captured):
+        """Record what support_agent asks build_agent for, and return a stub agent."""
+        def fake_build_agent(**kwargs):
+            captured.append(kwargs)
+            return lambda prompt: type("Result", (), {"message": f"echo: {prompt}"})()
+
+        patcher = unittest.mock.patch.object(
+            strands_agent, "build_agent", fake_build_agent
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class CedarRuleTest(unittest.TestCase):

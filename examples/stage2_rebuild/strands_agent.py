@@ -108,30 +108,61 @@ def build_agent(
     return Agent(**kwargs)
 
 
-# Runtime agent. Set AGENTCORE_MEMORY_ID (plus AGENTCORE_SESSION_ID /
-# AGENTCORE_ACTOR_ID) to back the deployed agent with AgentCore Memory, and
-# BEDROCK_GUARDRAIL_ID (plus BEDROCK_GUARDRAIL_VERSION, default "1") to run its
-# model calls behind the guardrail. Both are configuration: unset, this is the
-# same agent it was before either existed.
-_guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID")
-agent = build_agent(
-    memory_id=os.environ.get("AGENTCORE_MEMORY_ID"),
-    session_id=os.environ.get("AGENTCORE_SESSION_ID"),
-    actor_id=os.environ.get("AGENTCORE_ACTOR_ID"),
-    model=(
-        guarded_model(
-            _guardrail_id,
-            MODEL_ID,
-            guardrail_version=os.environ.get("BEDROCK_GUARDRAIL_VERSION", "1"),
+_agents = {}
+
+
+def support_agent(session_id: str) -> Agent:
+    """Build the agent for one session, and hold it for the life of the process.
+
+    Stage 1's pattern (stage1_replatform/agent_runtime.py:65), for the same two
+    reasons and one more. Not built at import time, so this module can be
+    imported offline — the environment Runtime provides has AGENTCORE_MEMORY_ID
+    and AGENTCORE_ACTOR_ID set and no session id, and building at import time
+    with that combination raised ValueError before the entrypoint could supply
+    the session id it actually has. Built once rather than per invocation,
+    because rebuilding constructs a new model client each turn.
+
+    The extra reason is the memory key. A session manager is pinned to one
+    session_id at construction, so one process-wide agent would file every
+    caller's turns under whichever session happened to arrive first. Stage 1
+    passes thread_id at invoke time and needs no such cache; Strands does not,
+    so the cache is keyed on the session.
+    """
+    if session_id not in _agents:
+        # Set BEDROCK_GUARDRAIL_ID (plus BEDROCK_GUARDRAIL_VERSION, default "1")
+        # to run the model calls behind the guardrail, and AGENTCORE_MEMORY_ID
+        # (plus AGENTCORE_ACTOR_ID) to back the agent with AgentCore Memory. Both
+        # are configuration: unset, this is the same agent it was before either
+        # existed.
+        guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID")
+        _agents[session_id] = build_agent(
+            memory_id=os.environ.get("AGENTCORE_MEMORY_ID"),
+            session_id=session_id,
+            actor_id=os.environ.get("AGENTCORE_ACTOR_ID"),
+            region_name=os.environ.get("AWS_REGION", "us-east-1"),
+            model=(
+                guarded_model(
+                    guardrail_id,
+                    MODEL_ID,
+                    guardrail_version=os.environ.get("BEDROCK_GUARDRAIL_VERSION", "1"),
+                    region_name=os.environ.get("AWS_REGION", "us-east-1"),
+                )
+                if guardrail_id
+                else None
+            ),
         )
-        if _guardrail_id
-        else None
-    ),
-)
+    return _agents[session_id]
 
 
 @app.entrypoint
 def agent_invocation(payload, context):
+    """What Runtime calls. The agent inside it is build_agent's, unchanged.
+
+    RequestContext.session_id is Optional and is None when the container is
+    invoked without one, so a fixed fallback keeps local runs on one session —
+    the same fallback stage 1 uses for thread_id.
+    """
+    agent = support_agent(context.session_id or "local-session")
     result = agent(payload.get("prompt", ""))
     return {"result": result.message}
 
