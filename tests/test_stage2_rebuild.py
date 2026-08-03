@@ -38,6 +38,8 @@ from strands.tools.mcp.mcp_agent_tool import MCPAgentTool
 
 from examples import run_walkthrough
 from examples.gateway import register_target
+from examples.memory import configure_memory as configure_memory_module
+from examples.memory.configure_memory import MEMORY_NAME
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
 from examples.stage2_rebuild.policy import attach_policy
 from examples.stage2_rebuild.policy.attach_policy import (
@@ -67,6 +69,7 @@ from tests.fake_control_plane import (
     ValidationException,
 )
 from tests.fake_mcp import FakeMCPClient, gateway_tool_list
+from tests.fake_memory import FakeMemoryControlPlane
 
 GATEWAY_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/gw-abc123"
 OTHER_GATEWAY_ARN = (
@@ -1466,6 +1469,85 @@ class TargetRegistrationTest(unittest.TestCase):
         self.assertTrue(
             valid_request("bedrock-agentcore-control", "CreateGatewayTarget", sent)
         )
+
+
+class MemoryReuseTest(unittest.TestCase):
+    """The step after the target, which failed the same way for the same reason.
+
+    CreateMemory rejects a duplicate name, so a second run against a surviving
+    memory resource died in configure_memory. Reused rather than updated here:
+    every run gets a fresh actor and session id, so a reused resource contributes
+    nothing to the event counts measured against it.
+    """
+
+    def setUp(self):
+        quiet(self)
+        self.plane = FakeMemoryControlPlane()
+        self.replaced = configure_memory_module.MemoryClient
+        self.addCleanup(
+            setattr, configure_memory_module, "MemoryClient", self.replaced
+        )
+        configure_memory_module.MemoryClient = lambda **kwargs: self.plane
+
+    def operations(self):
+        return [name for name, _ in self.plane.calls]
+
+    def test_the_first_run_creates(self):
+        memory_id = configure_memory_module.configure_memory()
+        self.assertIn("create_memory_and_wait", self.operations())
+        self.assertTrue(memory_id.startswith(MEMORY_NAME + "-"))
+
+    def test_a_second_run_reuses_rather_than_creating(self):
+        first = configure_memory_module.configure_memory()
+        self.plane.calls.clear()
+
+        second = configure_memory_module.configure_memory()
+
+        self.assertEqual(second, first)
+        self.assertNotIn("create_memory_and_wait", self.operations())
+        self.assertEqual(len(self.plane.memories), 1)
+
+    def test_reuse_prints_the_retention_the_resource_has_not_the_one_asked_for(self):
+        """The line it prints is a claim about the resource, so it has to read it.
+
+        A memory left by a run that took the SDK's 90-day default is reused by a
+        run whose code says 30, and printing 30 would be this file asserting a
+        retention it did not set.
+        """
+        self.plane = FakeMemoryControlPlane(existing=[(MEMORY_NAME, 90)])
+        configure_memory_module.MemoryClient = lambda **kwargs: self.plane
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            configure_memory_module.configure_memory(event_expiry_days=30)
+
+        printed = out.getvalue()
+        self.assertIn("90 days", printed)
+        self.assertNotIn("30 days", printed)
+        self.assertIn("get_memory", self.operations())
+
+    def test_a_memory_of_another_name_is_not_mistaken_for_ours(self):
+        self.plane = FakeMemoryControlPlane(existing=[("SomeoneElsesMemory", 90)])
+        configure_memory_module.MemoryClient = lambda **kwargs: self.plane
+
+        configure_memory_module.configure_memory()
+
+        self.assertIn("create_memory_and_wait", self.operations())
+        self.assertEqual(len(self.plane.memories), 2)
+
+    def test_the_reuse_lookup_matches_the_one_teardown_uses(self):
+        """Two places recover this resource by name, and they must agree.
+
+        discover_resources matches summary["id"].startswith(name + "-") so that
+        --teardown can find a memory it did not create. If the reuse lookup here
+        drifted from that rule, one of the two would stop finding the resource:
+        either a duplicate create, or a leak.
+        """
+        memory_id = self.plane._add(MEMORY_NAME, 30)
+        self.assertEqual(
+            configure_memory_module._find_existing_memory(self.plane), memory_id
+        )
+        self.assertTrue(memory_id.startswith(MEMORY_NAME + "-"))
 
 
 class MeasurementTableTest(unittest.TestCase):

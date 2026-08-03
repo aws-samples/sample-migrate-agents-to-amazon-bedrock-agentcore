@@ -10,10 +10,19 @@ it silently accepts a 90-day retention it never chose; the service accepts 3 to
 examples/stage1_replatform/agentcore_memory_saver.py writes its checkpoints, so
 this number is how long a conversation can be resumed, not just how long the
 transcript is kept.
+
+Idempotent, like create_gateway.py and register_target.py: a memory of this name
+is reused rather than recreated, because CreateMemory rejects a duplicate name.
+Reused untouched, unlike the gateway target — a memory resource holds
+conversations, and the walkthrough gives every run a fresh actor and session id,
+so nothing measured against a reused resource inherits an older run's events. The
+one thing reuse cannot promise is the retention it prints, so on reuse the number
+is read back off the resource instead of quoted from EVENT_EXPIRY_DAYS.
 """
 
 import argparse
 import os
+from typing import Optional
 
 from bedrock_agentcore.memory import MemoryClient
 
@@ -28,12 +37,36 @@ EVENT_EXPIRY_DAYS = 30
 MEMORY_NAME = "MigratedAgentMemory"
 
 
+def _find_existing_memory(client, name: str = MEMORY_NAME) -> Optional[str]:
+    """Return the id of an existing memory of this name, or None.
+
+    Matched on the id prefix rather than on the name, because ListMemories
+    summaries carry arn, createdAt, id and status and no name at all. The suffix
+    is the service's; the prefix and the separator are ours.
+    """
+    for summary in client.list_memories():
+        if summary["id"].startswith(name + "-"):
+            return summary["id"]
+    return None
+
+
 def configure_memory(
     region_name: str = "us-east-1",
     event_expiry_days: int = EVENT_EXPIRY_DAYS,
 ) -> str:
-    """Create the migrated agent's memory resource and return its memory id."""
+    """Create (or reuse) the migrated agent's memory and return its memory id."""
     client = MemoryClient(region_name=region_name)
+
+    existing_id = _find_existing_memory(client)
+    if existing_id is not None:
+        # Printed from the resource, not from the argument: this run did not set
+        # the retention and an older run may have chosen a different one.
+        memory = client.gmcp_client.get_memory(memoryId=existing_id)["memory"]
+        days = memory.get("eventExpiryDuration", "unknown")
+        print(f"Memory '{MEMORY_NAME}' already exists: {existing_id}")
+        print(f"  reused as it stands, events expire after {days} days")
+        return existing_id
+
     memory = client.create_memory_and_wait(
         name=MEMORY_NAME,
         description="Memory for migrated customer support agent",
