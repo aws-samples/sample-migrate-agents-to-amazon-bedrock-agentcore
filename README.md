@@ -218,8 +218,8 @@ because the Runtime deploy is part of it**: an AgentCore Runtime
 (`MigratedAgentRuntimeRole`), and a CloudWatch log group that nothing asked for —
 the service creates it on the runtime's first log line. `--teardown` deletes all
 four. `--stage 2` rebuilds
-the agent on Strands and hardens it, reusing stage 1's three resources and so
-needing the same two ARNs. Stage 2 creates a Cedar policy engine of its own, and
+the agent on Strands and hardens it, reusing the gateway, target and memory from
+stage 1 — not its runtime — and so needing the same two ARNs. Stage 2 creates a Cedar policy engine of its own, and
 `--teardown` deletes it. The rebuilt agent also has its own Runtime entry point at
 `examples/stage2_rebuild/strands_agent.py`.
 
