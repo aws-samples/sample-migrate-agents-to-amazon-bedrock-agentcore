@@ -600,6 +600,64 @@ class PolicyRegistrationTest(unittest.TestCase):
         self.assertNotIn("create_policy_engine", self.operations())
         self.assertEqual(self.control.engines[first]["name"], POLICY_ENGINE_NAME)
 
+    def test_a_second_run_updates_the_policies_rather_than_conflicting(self):
+        """The warm-run defect: CreatePolicy rejects a name already on the engine.
+
+        The fake now raises ConflictException on a duplicate name exactly as the
+        live service did, so a create-only second run would fail here. The rules
+        must be updated in place instead, and their ids must be stable so the
+        ledger teardown deletes still points at them.
+        """
+        _, first_ids = register(
+            "gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1"
+        )
+        self.control.calls.clear()
+
+        _, second_ids = register(
+            "gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1"
+        )
+
+        self.assertEqual(second_ids, first_ids)
+        self.assertNotIn("create_policy", self.operations())
+        self.assertEqual(self.operations().count("update_policy"), 2)
+        # Two rules named twice must still be two policies, not four.
+        self.assertEqual(len(self.control._policy_summaries()), 2)
+
+    def test_a_rerun_with_a_new_gateway_arn_overwrites_the_stale_statement(self):
+        """Why update and not reuse-untouched: the ARN is baked into the rule.
+
+        A rebuilt gateway has a new ARN, and a policy still naming the old one
+        authorizes calls to a gateway that no longer exists. The second run has to
+        rewrite the statement, not keep the first.
+        """
+        register(
+            "gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1"
+        )
+        rebuilt_arn = GATEWAY_ARN.replace("gw-abc123", "gw-rebuilt99")
+
+        register(
+            "gw-rebuilt99", rebuilt_arn, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1"
+        )
+
+        statements = [
+            policy["definition"]["cedar"]["statement"]
+            for policy in self.control.policies.values()
+        ]
+        self.assertTrue(any(rebuilt_arn in s for s in statements))
+        self.assertFalse(any(GATEWAY_ARN in s and rebuilt_arn not in s for s in statements))
+
+    def test_update_policy_requests_are_valid_requests(self):
+        register("gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1")
+        self.control.calls.clear()
+        register("gw-abc123", GATEWAY_ARN, READ_ONLY, SUPPORT_AGENT, "ENFORCE", "us-east-1")
+        updates = [p for name, p in self.control.calls if name == "update_policy"]
+        self.assertEqual(len(updates), 2)
+        for params in updates:
+            with self.subTest(policy=params["policyId"]):
+                self.assertTrue(
+                    valid_request("bedrock-agentcore-control", "UpdatePolicy", params)
+                )
+
     def test_the_engine_is_active_before_any_rule_is_created_on_it(self):
         # CreatePolicy against an engine still CREATING is a request that fails at
         # step 10 and nowhere earlier, so the waiter has to run before the first

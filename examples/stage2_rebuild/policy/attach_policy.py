@@ -170,6 +170,21 @@ def _find_engine(control, name: str) -> Optional[str]:
     return None
 
 
+def _existing_policies(control, engine_id: str) -> Dict[str, str]:
+    """Return {name: policyId} for the policies already on this engine.
+
+    ListPolicies summaries carry the name here, unlike the memory case, so the
+    match is on the name the .cedar block declares rather than on an id prefix.
+    """
+    existing = {}
+    for page in control.get_paginator("list_policies").paginate(
+        policyEngineId=engine_id
+    ):
+        for summary in page.get("policies", []):
+            existing[summary.get("name")] = summary["policyId"]
+    return existing
+
+
 def create_policy_engine(
     name: str = POLICY_ENGINE_NAME,
     region_name: str = "us-east-1",
@@ -199,7 +214,14 @@ def create_policies(
     policies: List[Tuple[str, str]],
     region_name: str = "us-east-1",
 ) -> Dict[str, str]:
-    """Create one policy per rendered rule and return {name: policyId}.
+    """Create or update one policy per rendered rule and return {name: policyId}.
+
+    Idempotent, like the gateway target and unlike the memory: a second run
+    updates the statement rather than reusing it, because the Cedar text embeds
+    the gateway ARN and both principal ARNs, and a re-run against a rebuilt
+    gateway or different principals has to overwrite the stale rule, not keep it.
+    Without this the second --stage all dies on CreatePolicy's ConflictException,
+    exactly as it did on the target and the memory before those were fixed.
 
     validationMode is left at its FAIL_ON_ANY_FINDINGS default deliberately. The
     engine validates each statement against the Cedar schema it generated from
@@ -207,20 +229,32 @@ def create_policies(
     that does not exist is rejected here rather than silently never matching.
     """
     control = boto3.client("bedrock-agentcore-control", region_name=region_name)
+    existing = _existing_policies(control, engine_id)
     created = {}
     for name, statement in policies:
-        response = control.create_policy(
-            name=name,
-            policyEngineId=engine_id,
-            definition={"cedar": {"statement": statement}},
-        )
+        definition = {"cedar": {"statement": statement}}
+        if name in existing:
+            policy_id = existing[name]
+            control.update_policy(
+                policyEngineId=engine_id,
+                policyId=policy_id,
+                definition=definition,
+            )
+            verb = "Updated policy"
+        else:
+            policy_id = control.create_policy(
+                name=name,
+                policyEngineId=engine_id,
+                definition=definition,
+            )["policyId"]
+            verb = "Created policy"
         _wait_until_active(
             control.get_policy,
             policyEngineId=engine_id,
-            policyId=response["policyId"],
+            policyId=policy_id,
         )
-        created[name] = response["policyId"]
-        print(f"Created policy {name}: {response['policyId']}")
+        created[name] = policy_id
+        print(f"{verb} {name}: {policy_id}")
     return created
 
 

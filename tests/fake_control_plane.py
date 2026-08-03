@@ -263,6 +263,8 @@ class FakeAgentCoreControlClient:
     def get_paginator(self, name):
         if name == "list_gateway_targets":
             return _Paginator("items", self._target_summaries)
+        if name == "list_policies":
+            return _Paginator("policies", self._policy_summaries)
         if name != "list_policy_engines":
             raise ValueError(f"Unfaked paginator: {name}")
         return _Paginator("policyEngines", self._engine_summaries)
@@ -281,10 +283,43 @@ class FakeAgentCoreControlClient:
             if engine_id not in self.deleted
         ]
 
+    def _policy_summaries(self):
+        return [
+            {
+                "policyId": policy_id,
+                "name": policy.get("name"),
+                "policyEngineId": policy.get("policyEngineId"),
+            }
+            for policy_id, policy in self.policies.items()
+            if policy_id not in self.deleted
+        ]
+
     def create_policy(self, **kwargs):
         self.calls.append(("create_policy", kwargs))
+        # The live failure the warm run hit: CreatePolicy rejects a name already
+        # taken on the same engine, the same way CreateGatewayTarget and
+        # CreateMemory do. Scoped to the engine, because policy names are unique
+        # per engine and not per account.
+        for policy_id, policy in self.policies.items():
+            if policy_id in self.deleted:
+                continue
+            if policy.get("name") == kwargs.get("name") and policy.get(
+                "policyEngineId"
+            ) == kwargs.get("policyEngineId"):
+                raise ConflictException(
+                    f"Policy with the same name already exists: {kwargs.get('name')}"
+                )
         policy_id = self._make_id("policy")
         self.policies[policy_id] = kwargs
+        self._get_counts[policy_id] = 0
+        return {"policyId": policy_id}
+
+    def update_policy(self, **kwargs):
+        self.calls.append(("update_policy", kwargs))
+        policy_id = kwargs["policyId"]
+        if policy_id in self.deleted or policy_id not in self.policies:
+            raise ResourceNotFoundException(f"{policy_id} not found")
+        self.policies[policy_id].update(kwargs)
         self._get_counts[policy_id] = 0
         return {"policyId": policy_id}
 
@@ -302,7 +337,11 @@ class FakeAgentCoreControlClient:
         seen = self._get_counts[policy_id]
         self._get_counts[policy_id] = seen + 1
         status = "ACTIVE" if seen >= self.active_after else "CREATING"
-        return {"policyId": policy_id, "status": status}
+        return {
+            "policyId": policy_id,
+            "name": self.policies[policy_id].get("name"),
+            "status": status,
+        }
 
     def delete_policy(self, **kwargs):
         self.calls.append(("delete_policy", kwargs))
