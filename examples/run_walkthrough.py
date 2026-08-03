@@ -478,18 +478,42 @@ def deploy_to_runtime(
     # createdAt -> lastUpdatedAt delta means something different on each branch.
     was_already_there = deploy_runtime.existing_runtime_id(region_name) is not None
 
+    if created is not None:
+        # Recorded before the deploy rather than from its return value. deploy()
+        # creates the bucket and the role before the call most likely to fail, and
+        # both names are derivable without a create -- the bucket from the account
+        # id, the role from a constant -- so there is nothing to wait for. Waiting
+        # is what left a deploy that raised part way through with a --teardown in
+        # this same process that had no record of either.
+        created["zip_bucket"] = deploy_runtime.bucket_name(
+            boto3.client("sts", region_name=region_name).get_caller_identity()["Account"]
+        )
+        created["runtime_role"] = deploy_runtime.ROLE_NAME
+
     # Two rows out of one call, because the wall clock across deploy() is not a
     # number about AgentCore: most of it is pip downloading wheels. The composite is
     # still reported -- it is what a reader waits through, and it is the row that
     # turns into a "time to FAIL" marker if the deploy raises.
-    with _optional_timing(
-        measured,
-        "runtime deploy, zip build through READY",
-        "packaging and provisioning together, split in the two rows below",
-    ):
-        runtime_id, runtime_arn, timings = deploy_runtime.deploy(
-            gateway_url, memory_id, actor_id, region_name
-        )
+    try:
+        with _optional_timing(
+            measured,
+            "runtime deploy, zip build through READY",
+            "packaging and provisioning together, split in the two rows below",
+        ):
+            runtime_id, runtime_arn, timings = deploy_runtime.deploy(
+                gateway_url, memory_id, actor_id, region_name
+            )
+    except Exception:
+        # A create that succeeded and then failed to reach READY -- CREATE_FAILED
+        # on a bad artifact, or the wait timing out -- took its id out of this
+        # process with the exception, and that runtime is billable. The name is
+        # deterministic, so ask the account for the id instead of losing it.
+        if created is not None:
+            orphan = deploy_runtime.existing_runtime_id(region_name)
+            if orphan:
+                created["runtime_id"] = orphan
+                created["log_groups"] = [deploy_runtime.log_group_name(orphan)]
+        raise
     if measured is not None:
         provisioning_note = (
             f"{REUSED}: an UpdateAgentRuntime and its wait"
@@ -514,10 +538,6 @@ def deploy_to_runtime(
         )
     if created is not None:
         created["runtime_id"] = runtime_id
-        created["zip_bucket"] = deploy_runtime.bucket_name(
-            boto3.client("sts", region_name=region_name).get_caller_identity()["Account"]
-        )
-        created["runtime_role"] = deploy_runtime.ROLE_NAME
         # Recorded before the first invocation, which is what creates it. The name
         # is derivable from the id and the id stops being discoverable once the
         # runtime is deleted, so teardown cannot work this out for itself later.

@@ -1483,6 +1483,107 @@ class TeardownTest(unittest.TestCase):
         self.assertIn(f"not deleted with it: {group}", printed)
 
 
+class RuntimeLedgerTest(unittest.TestCase):
+    """What --teardown knows about the runtime when the deploy raises.
+
+    The teardown itself is well covered above, but only against a ledger that a
+    finished deploy filled in. The interesting run is the other one: deploy()
+    creates the artifact bucket and the execution role first and the runtime last,
+    so every way it can fail leaves resources behind whose names reached no
+    ledger. That teardown then completes, prints no failure, and leaves a bucket
+    holding 50 MB and a role behind it.
+
+    The recovery path -- --teardown with no --stage -- finds all of them by name,
+    which is why this was survivable. It is not a defence: a reader whose
+    --stage all --teardown ran to the end has no reason to run a second teardown.
+    """
+
+    def setUp(self):
+        quiet(self)
+        patch_boto3(self, run_walkthrough, sts=FakeSTSClient())
+        self.deploy_calls = []
+
+    def failing_deploy(self, error=RuntimeError("Runtime is CREATE_FAILED")):
+        def deploy(*args, **kwargs):
+            self.deploy_calls.append((args, kwargs))
+            raise error
+
+        return deploy
+
+    def run_deploy(self, existing_ids):
+        """deploy_to_runtime over a deploy that raises. Returns the ledger.
+
+        ``existing_ids`` is what existing_runtime_id returns on each call: the
+        walkthrough asks once before the deploy, and the fix asks again after it
+        failed.
+        """
+        answers = list(existing_ids)
+        created = {}
+        with unittest.mock.patch.object(
+            run_walkthrough.deploy_runtime, "deploy", self.failing_deploy()
+        ), unittest.mock.patch.object(
+            run_walkthrough.deploy_runtime,
+            "existing_runtime_id",
+            lambda region_name=None: answers.pop(0),
+        ):
+            with self.assertRaises(RuntimeError):
+                run_walkthrough.deploy_to_runtime(
+                    "https://gw.example/mcp",
+                    "mem-abc123",
+                    "customer-1",
+                    "us-east-1",
+                    None,
+                    created,
+                )
+        return created
+
+    def test_a_deploy_that_fails_before_the_runtime_still_records_bucket_and_role(self):
+        """Both are created before the call most likely to fail, and both names
+        are derivable without a create, so nothing has to be waited for."""
+        created = self.run_deploy([None, None])
+
+        self.assertEqual(created["zip_bucket"], "migrated-agent-runtime-123456789012")
+        self.assertEqual(
+            created["runtime_role"], run_walkthrough.deploy_runtime.ROLE_NAME
+        )
+
+    def test_a_runtime_that_never_reached_ready_still_reaches_the_ledger(self):
+        """CREATE_FAILED and a wait_ready timeout both leave a runtime whose id
+        went out of the process with the exception. The name is deterministic."""
+        created = self.run_deploy([None, "MigratedAgentRuntime-abc1234567"])
+
+        self.assertEqual(created["runtime_id"], "MigratedAgentRuntime-abc1234567")
+        self.assertEqual(
+            created["log_groups"],
+            ["/aws/bedrock-agentcore/runtimes/MigratedAgentRuntime-abc1234567-DEFAULT"],
+        )
+
+    def test_a_failed_deploy_that_created_no_runtime_claims_none(self):
+        """The recovery lookup must not invent a runtime for teardown to delete."""
+        created = self.run_deploy([None, None])
+
+        self.assertNotIn("runtime_id", created)
+        self.assertNotIn("log_groups", created)
+
+    def test_every_runtime_key_teardown_takes_is_one_the_ledger_can_hold(self):
+        """The two halves of this contract are written in two places.
+
+        teardown's signature is what a reader reads as the promise; the ledger is
+        what fills it. A key added to one and not the other is a resource the flag
+        claims and does not delete, which is the class of defect this file's
+        teardown tests cannot see because they pass the kwargs themselves.
+        """
+        runtime_keys = {"runtime_id", "zip_bucket", "runtime_role", "log_groups"}
+        signature = set(
+            inspect.signature(run_walkthrough.teardown).parameters
+        )
+        self.assertTrue(runtime_keys <= signature, runtime_keys - signature)
+
+        source = inspect.getsource(run_walkthrough.deploy_to_runtime)
+        for key in runtime_keys:
+            self.assertIn(f'created["{key}"]', source)
+
+
 class TargetRegistrationTest(unittest.TestCase):
     """Registering the target twice, which is what a second walkthrough run does.
 
