@@ -34,7 +34,6 @@ examples/
 │   └── crewai_agent.py         # Wrap a CrewAI agent for AgentCore Runtime
 ├── stage2_rebuild/
 │   ├── strands_agent.py        # Rebuild with Strands Agents SDK (memory-backed)
-│   ├── guardrail.py            # Create, attach and delete the Bedrock Guardrail
 │   └── policy/
 │       ├── support_tools.cedar # Cedar rules authorizing each gateway tool call
 │       └── attach_policy.py    # Register the rules and attach them to the gateway
@@ -139,9 +138,8 @@ python -m examples.run_walkthrough \
 self-hosted starting point and creates nothing, so it needs neither ARN;
 `--stage 1` creates the gateway, target and memory above; `--stage 2` rebuilds
 the agent on Strands and hardens it, reusing stage 1's three resources and so
-needing the same two ARNs. Stage 2 creates a Bedrock Guardrail and a Cedar
-policy engine of its own, and `--teardown` deletes both. The rebuilt agent also
-has its own Runtime entry point at
+needing the same two ARNs. Stage 2 creates a Cedar policy engine of its own, and
+`--teardown` deletes it. The rebuilt agent also has its own Runtime entry point at
 `examples/stage2_rebuild/strands_agent.py`.
 
 Both ARNs are printed by `examples/gateway/lambda_target/deploy.sh`:
@@ -161,7 +159,7 @@ argument or environment variable (`GATEWAY_ID`, `GATEWAY_URL`,
 
 If you created AWS resources while following the examples, delete them to avoid ongoing charges.
 
-Passing `--teardown` to `examples/run_walkthrough.py` deletes what the walkthrough created, in the required order: the gateway target first, then the gateway once target deletion has finished, then the memory resource, then stage 2's guardrail, and last the Cedar policies and the policy engine holding them. Deleting a gateway that still has a target attached returns `ValidationException`, and it does so for a while after `ListGatewayTargets` already returns nothing, so the delete is retried and completion is confirmed with `GetGateway`. Every step is attempted even when an earlier one fails, and the failures are reported together at the end: the guardrail is billable, so it must not be the resource a fail-fast teardown skips.
+Passing `--teardown` to `examples/run_walkthrough.py` deletes what the walkthrough created, in the required order: the gateway target first, then the gateway once target deletion has finished, then the memory resource, and last the Cedar policies and the policy engine holding them. Deleting a gateway that still has a target attached returns `ValidationException`, and it does so for a while after `ListGatewayTargets` already returns nothing, so the delete is retried and completion is confirmed with `GetGateway`. Every step is attempted even when an earlier one fails, and the failures are reported together at the end, because a teardown that stops at its first error orphans everything later in the list.
 
 To remove resources by hand:
 

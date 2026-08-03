@@ -1,28 +1,21 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Stage-2 verification: the Strands rebuild, its Guardrail, and its Cedar rules.
+"""Stage-2 verification: the Strands rebuild and its Cedar rules.
 
-Runs offline and makes no AWS calls. The guardrail and AgentCore control planes
-are faked (tests/fake_control_plane.py), the MCP session is faked
-(tests/fake_mcp.py), and the clocks inside the waiters are faked so a poll loop
-finishes instantly and a timeout is reachable. What is real: the shipped
-support_tools.cedar text, the real BedrockModel and the real Strands Agent (both
-construct boto3 clients and call nothing), the real MCPAgentTool wrapper, and the
-real botocore service models, used to validate every request shape this code
-would send.
+Runs offline and makes no AWS calls. The AgentCore control plane is faked
+(tests/fake_control_plane.py), the MCP session is faked (tests/fake_mcp.py), and
+the clocks inside the waiters are faked so a poll loop finishes instantly and a
+timeout is reachable. What is real: the shipped support_tools.cedar text, the real
+Strands Agent (it constructs a boto3 client and calls nothing), the real
+MCPAgentTool wrapper, and the real botocore service models, used to validate every
+request shape this code would send.
 
-Two limits worth stating plainly, because they bound what passing here proves:
-
-1. There is no synchronous Cedar authorization API. The deny is asserted by
-   evaluating the shipped rules with the Cedar subset evaluator in
-   tests/fake_cedar.py, so what is verified is that the rules mean what stage 2
-   claims — not that the Gateway enforces them. That needs the live run.
-2. A guardrail's filtering behaviour is a model-side decision. What is verified
-   here is that the PII rule is configured, that the request carrying it is a
-   valid CreateGuardrail request, and that the guardrail reaches the model the
-   agent invokes. Whether a given card number is anonymised is only observable
-   live.
+One limit worth stating plainly, because it bounds what passing here proves:
+there is no synchronous Cedar authorization API. The deny is asserted by
+evaluating the shipped rules with the Cedar subset evaluator in
+tests/fake_cedar.py, so what is verified is that the rules mean what stage 2
+claims — not that the Gateway enforces them. That needs the live run.
 
 Run from the repository root:
 
@@ -43,15 +36,6 @@ from strands.tools.mcp.mcp_agent_tool import MCPAgentTool
 
 from examples import run_walkthrough
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
-from examples.stage2_rebuild import guardrail as guardrail_module
-from examples.stage2_rebuild.guardrail import (
-    BLOCKED_INPUT_MESSAGE,
-    GUARDRAIL_NAME,
-    PII_ENTITIES,
-    create_guardrail,
-    delete_guardrail,
-    guarded_model,
-)
 from examples.stage2_rebuild.policy import attach_policy
 from examples.stage2_rebuild.policy.attach_policy import (
     POLICY_ENGINE_NAME,
@@ -69,11 +53,9 @@ from tests import fake_cedar
 from tests.fake_cedar import Entity
 from tests.fake_control_plane import (
     FakeAgentCoreControlClient,
-    FakeBedrockClient,
     FakeBoto3,
     FakeClock,
     FakeSTSClient,
-    ResourceNotFoundException,
     ValidationException,
 )
 from tests.fake_mcp import FakeMCPClient, gateway_tool_list
@@ -128,176 +110,12 @@ def real_gateway_tools(client=None):
     ]
 
 
-class GuardrailConfigTest(unittest.TestCase):
-    """The PII rule is configured, and configured as a valid request."""
+class BuildAgentTest(unittest.TestCase):
+    """build_agent's contract, on the two points a caller can get wrong."""
 
-    def test_the_create_request_is_a_valid_create_guardrail_request(self):
-        # Validated against the real bedrock service model, so a misspelled key or
-        # a missing required field fails here rather than at step 10.
-        bedrock = FakeBedrockClient()
-        self._create_with(bedrock)
-        operation, params = bedrock.calls[0]
-        self.assertEqual(operation, "create_guardrail")
-        self.assertTrue(valid_request("bedrock", "CreateGuardrail", params))
+    def test_the_gateway_tools_supersede_the_local_stubs(self):
+        agent = build_agent(extra_tools=real_gateway_tools())
 
-    def test_the_pii_rule_reaches_the_create_request(self):
-        bedrock = FakeBedrockClient()
-        self._create_with(bedrock)
-        params = bedrock.calls[0][1]
-        configured = params["sensitiveInformationPolicyConfig"]["piiEntitiesConfig"]
-        self.assertEqual(configured, PII_ENTITIES)
-
-    def test_no_topic_policy_is_configured(self):
-        # Measured live: a DENY topic written as "an order that is not the caller's"
-        # matched every prompt naming an order number, including the customer's own,
-        # because a topic classifier reads the sentence and cannot see who is asking.
-        # Who may call which tool is Cedar's job, at the gateway. A topic policy
-        # reappearing here would put that decision back in the wrong place.
-        bedrock = FakeBedrockClient()
-        self._create_with(bedrock)
-        params = bedrock.calls[0][1]
-        self.assertNotIn("topicPolicyConfig", params)
-        self.assertFalse(hasattr(guardrail_module, "DENIED_TOPIC"))
-
-    def test_the_refusal_text_is_configured_rather_than_left_to_the_model(self):
-        # CreateGuardrail requires both messages whatever the policies are, and an
-        # unset one would leave a refusal in the model's own words — the thing a
-        # guardrail exists to stop being a prompt-engineering problem.
-        bedrock = FakeBedrockClient()
-        self._create_with(bedrock)
-        params = bedrock.calls[0][1]
-        self.assertEqual(params["blockedInputMessaging"], BLOCKED_INPUT_MESSAGE)
-        self.assertTrue(params["blockedOutputsMessaging"])
-
-    def test_card_numbers_are_anonymised_rather_than_blocked(self):
-        # BLOCK would refuse the whole turn, so a customer who pastes a card number
-        # into a return reason would lose the return as well as the number.
-        self.assertTrue(PII_ENTITIES)
-        self.assertEqual({e["action"] for e in PII_ENTITIES}, {"ANONYMIZE"})
-        self.assertIn(
-            "CREDIT_DEBIT_CARD_NUMBER", {e["type"] for e in PII_ENTITIES}
-        )
-
-    def _create_with(self, bedrock):
-        quiet(self)
-        patch_boto3(self, guardrail_module, bedrock=bedrock)
-        patch_clock(self, guardrail_module)
-        return create_guardrail(region_name="us-east-1")
-
-
-class GuardrailCreateTest(unittest.TestCase):
-    """Idempotency, versioning, and the two waits around them."""
-
-    def setUp(self):
-        quiet(self)
-        self.bedrock = FakeBedrockClient(ready_after=2)
-        patch_boto3(self, guardrail_module, bedrock=self.bedrock)
-        self.clock = patch_clock(self, guardrail_module)
-
-    def operations(self):
-        return [name for name, _ in self.bedrock.calls]
-
-    def test_a_new_guardrail_is_created_versioned_and_waited_for(self):
-        guardrail_id, version = create_guardrail(region_name="us-east-1")
-
-        self.assertIn("create_guardrail", self.operations())
-        self.assertIn("create_guardrail_version", self.operations())
-        self.assertEqual(version, "1")
-        # ready_after=2 means the first two get_guardrail calls said CREATING, so
-        # returning at all means the waiter polled rather than assuming.
-        self.assertGreaterEqual(self.operations().count("get_guardrail"), 4)
-        self.assertTrue(self.clock.slept)
-        self.assertTrue(guardrail_id.startswith("gr-"))
-
-    def test_an_existing_guardrail_is_reused_rather_than_duplicated(self):
-        existing = self.bedrock.seed(GUARDRAIL_NAME, versions=("1", "2"))
-
-        guardrail_id, version = create_guardrail(region_name="us-east-1")
-
-        self.assertEqual(guardrail_id, existing)
-        self.assertNotIn("create_guardrail", self.operations())
-        self.assertNotIn("create_guardrail_version", self.operations())
-        # The highest numbered version, not the first one listed.
-        self.assertEqual(version, "2")
-
-    def test_a_draft_only_guardrail_gets_a_numbered_version(self):
-        # ListGuardrails returns one row per version, so this is a state that
-        # really occurs: created once, never versioned.
-        self.bedrock.seed(GUARDRAIL_NAME, versions=())
-
-        _, version = create_guardrail(region_name="us-east-1")
-
-        self.assertEqual(version, "1")
-        self.assertIn("create_guardrail_version", self.operations())
-
-    def test_the_returned_version_is_never_draft(self):
-        # DRAFT is mutable: an agent pinned to it can have its filtering changed
-        # without a deployment.
-        for versions in ((), ("1",), ("1", "2", "3")):
-            with self.subTest(versions=versions):
-                bedrock = FakeBedrockClient(ready_after=0)
-                bedrock.seed(GUARDRAIL_NAME, versions=versions)
-                patch_boto3(self, guardrail_module, bedrock=bedrock)
-                _, version = create_guardrail(region_name="us-east-1")
-                self.assertNotEqual(version, "DRAFT")
-                self.assertTrue(version.isdigit())
-
-    def test_another_guardrails_name_is_not_mistaken_for_this_one(self):
-        self.bedrock.seed("some-other-teams-guardrail", versions=("7",))
-
-        guardrail_id, version = create_guardrail(region_name="us-east-1")
-
-        self.assertIn("create_guardrail", self.operations())
-        self.assertEqual(version, "1")
-        self.assertNotEqual(guardrail_id, "gr-000000000001")
-
-    def test_a_failed_guardrail_raises_instead_of_being_used(self):
-        guardrail_id = self.bedrock.seed(GUARDRAIL_NAME, versions=())
-        self.bedrock.guardrails[guardrail_id]["config"] = {}
-
-        def failed(**kwargs):
-            return {"guardrailId": guardrail_id, "status": "FAILED"}
-
-        self.bedrock.get_guardrail = failed
-        with self.assertRaises(RuntimeError) as caught:
-            create_guardrail(region_name="us-east-1")
-        self.assertIn("FAILED", str(caught.exception))
-
-    def test_a_guardrail_stuck_creating_times_out(self):
-        guardrail_id = self.bedrock.seed(GUARDRAIL_NAME, versions=())
-        self.bedrock.get_guardrail = lambda **kwargs: {
-            "guardrailId": guardrail_id,
-            "status": "CREATING",
-        }
-        with self.assertRaises(TimeoutError):
-            create_guardrail(region_name="us-east-1")
-
-
-class GuardedModelTest(unittest.TestCase):
-    """The guardrail has to reach the model the agent actually invokes."""
-
-    def test_guarded_model_carries_the_id_and_the_pinned_version(self):
-        model = guarded_model("gr-1", MODEL_ID, "3", "us-west-2")
-        config = model.get_config()
-        self.assertEqual(config["model_id"], MODEL_ID)
-        self.assertEqual(config["guardrail_id"], "gr-1")
-        self.assertEqual(config["guardrail_version"], "3")
-
-    def test_the_agent_invokes_the_guarded_model(self):
-        agent = build_agent(model=guarded_model("gr-1", MODEL_ID, "1"))
-        # Not "a guarded model was constructed": the model on the agent is the one
-        # carrying the guardrail, so every turn goes through it.
-        self.assertEqual(agent.model.get_config()["guardrail_id"], "gr-1")
-
-    def test_an_unguarded_agent_is_the_negative_control(self):
-        agent = build_agent()
-        self.assertIsNone(agent.model.get_config().get("guardrail_id"))
-        self.assertEqual(agent.model.get_config()["model_id"], MODEL_ID)
-
-    def test_the_guardrail_and_the_gateway_tools_hold_at_the_same_time(self):
-        agent = build_agent(model=guarded_model("gr-1", MODEL_ID), extra_tools=real_gateway_tools())
-
-        self.assertEqual(agent.model.get_config()["guardrail_id"], "gr-1")
         registered = sorted(agent.tool_registry.get_all_tools_config())
         self.assertEqual(registered, ["search_faq", LOOKUP, PROCESS_RETURN])
         # Stage 1's supersede rule still holds: no bare lookup_order stub left.
@@ -305,8 +123,7 @@ class GuardedModelTest(unittest.TestCase):
         self.assertNotIn("process_return", registered)
 
     def test_memory_still_requires_both_ids(self):
-        # Stage 1's assertion, restated on the moved module: the guardrail did not
-        # change the memory contract.
+        # Stage 1's assertion, restated on the moved module.
         with self.assertRaises(ValueError):
             build_agent(memory_id="mem-1")
 
@@ -786,52 +603,6 @@ class PolicyDeletionTest(unittest.TestCase):
             delete_policy_engine(self.engine_id, "us-east-1", timeout=30)
 
 
-class GuardrailDeletionTest(unittest.TestCase):
-    """R11: the billable resource has to actually go."""
-
-    def setUp(self):
-        quiet(self)
-        self.bedrock = FakeBedrockClient(ready_after=0, delete_lag=2)
-        patch_boto3(self, guardrail_module, bedrock=self.bedrock)
-        self.clock = patch_clock(self, guardrail_module)
-        self.guardrail_id = self.bedrock.seed(GUARDRAIL_NAME)
-        self.bedrock.calls.clear()
-
-    def test_the_delete_is_confirmed_by_a_get_rather_than_by_the_call_returning(self):
-        delete_guardrail(self.guardrail_id, "us-east-1")
-
-        operations = [name for name, _ in self.bedrock.calls]
-        self.assertEqual(operations.count("delete_guardrail"), 1)
-        # delete_lag=2: two get_guardrail calls still succeeded after the delete.
-        self.assertGreaterEqual(operations.count("get_guardrail"), 3)
-        self.assertIn(self.guardrail_id, self.bedrock.deleted)
-
-    def test_the_delete_names_no_version_so_every_version_goes(self):
-        delete_guardrail(self.guardrail_id, "us-east-1")
-        params = [p for name, p in self.bedrock.calls if name == "delete_guardrail"][0]
-        self.assertEqual(params, {"guardrailIdentifier": self.guardrail_id})
-        self.assertTrue(valid_request("bedrock", "DeleteGuardrail", params))
-
-    def test_an_in_use_guardrail_is_retried_rather_than_abandoned(self):
-        self.bedrock.in_use_failures = 2
-
-        delete_guardrail(self.guardrail_id, "us-east-1")
-
-        attempts = [1 for name, _ in self.bedrock.calls if name == "delete_guardrail"]
-        self.assertEqual(len(attempts), 3)
-        self.assertIn(self.guardrail_id, self.bedrock.deleted)
-
-    def test_an_already_deleted_guardrail_is_not_an_error(self):
-        delete_guardrail(self.guardrail_id, "us-east-1")
-        delete_guardrail(self.guardrail_id, "us-east-1")  # must not raise
-
-    def test_a_guardrail_that_never_goes_raises_rather_than_reporting_success(self):
-        # Silence here would be the R11 failure: a billable resource reported gone.
-        self.bedrock.delete_lag = 10_000
-        with self.assertRaises(TimeoutError):
-            delete_guardrail(self.guardrail_id, "us-east-1", timeout=30)
-
-
 class TeardownTest(unittest.TestCase):
     """The walkthrough's teardown: correct order, and nothing skipped."""
 
@@ -845,14 +616,13 @@ class TeardownTest(unittest.TestCase):
         )
         patch_clock(self, run_walkthrough)
         self.replace(run_walkthrough, "MemoryClient", self._memory_client)
-        self.replace(run_walkthrough, "delete_guardrail", self._recorder("guardrail"))
         self.replace(run_walkthrough, "delete_policies", self._recorder("policies"))
         self.replace(
             run_walkthrough, "delete_policy_engine", self._recorder("policy engine")
         )
         # The target and gateway deletes stay real, because their retry and
         # confirm behaviour is part of what is under test here; they are only
-        # instrumented so that one ordered list covers all six steps.
+        # instrumented so that one ordered list covers all five steps.
         self._instrument("delete_gateway_target", "target")
         self._instrument("delete_gateway", "gateway")
 
@@ -896,7 +666,6 @@ class TeardownTest(unittest.TestCase):
             "target_id": "tgt-abc123",
             "memory_id": "mem-abc123",
             "region_name": "us-east-1",
-            "guardrail_id": "gr-1",
             "policy_engine_id": "policy-engine-1",
             "policy_ids": ["policy-1", "policy-2"],
         }
@@ -908,14 +677,15 @@ class TeardownTest(unittest.TestCase):
 
         self.assertEqual(
             self.attempted,
-            ["target", "gateway", "memory", "guardrail", "policies", "policy engine"],
+            ["target", "gateway", "memory", "policies", "policy engine"],
         )
         self.assertEqual(self.memory, ["mem-abc123"])
         self.assertTrue(self.control.gateway_deleted)
 
-    def test_a_failing_gateway_delete_does_not_skip_the_guardrail(self):
+    def test_a_failing_gateway_delete_does_not_skip_the_rest(self):
         # Exactly the run-2 failure R11 is about: a fail-fast teardown orphans
-        # everything after the first error, and the guardrail is billable.
+        # everything after the first error, and nothing later in the list is
+        # cheaper to leave behind than the gateway that would not go.
         self.control.validation_failures = 10_000
 
         with self.assertRaises(RuntimeError) as caught:
@@ -923,23 +693,10 @@ class TeardownTest(unittest.TestCase):
 
         self.assertEqual(
             self.attempted,
-            ["target", "gateway", "memory", "guardrail", "policies", "policy engine"],
+            ["target", "gateway", "memory", "policies", "policy engine"],
         )
         self.assertIn("gateway", str(caught.exception))
         self.assertIn("ValidationException", str(caught.exception))
-
-    def test_a_failing_guardrail_delete_still_reports_and_still_deletes_the_rest(self):
-        self.replace(
-            run_walkthrough,
-            "delete_guardrail",
-            self._recorder("guardrail", error=RuntimeError("guardrail is in use")),
-        )
-
-        with self.assertRaises(RuntimeError) as caught:
-            self.full_teardown()
-
-        self.assertIn("guardrail", str(caught.exception))
-        self.assertEqual(self.attempted[-2:], ["policies", "policy engine"])
 
     def test_several_failures_are_all_reported_not_just_the_first(self):
         self.control.validation_failures = 10_000
@@ -962,13 +719,6 @@ class TeardownTest(unittest.TestCase):
 
         self.assertEqual(self.attempted, ["target", "gateway", "memory"])
 
-    def test_resources_that_were_never_created_are_not_deleted(self):
-        # A stage 2 that died after the guardrail has no policy ids, and a delete
-        # against an empty id would fail and mask the real failure.
-        self.full_teardown(policy_ids=(), policy_engine_id="")
-
-        self.assertEqual(self.attempted, ["target", "gateway", "memory", "guardrail"])
-
     def test_the_gateway_delete_is_retried_and_then_confirmed_gone(self):
         # Measured live: DeleteGateway raised ValidationException while
         # ListGatewayTargets already returned [].
@@ -988,7 +738,7 @@ class TeardownTest(unittest.TestCase):
 
         self.assertEqual(
             self.attempted,
-            ["target", "gateway", "memory", "guardrail", "policies", "policy engine"],
+            ["target", "gateway", "memory", "policies", "policy engine"],
         )
 
     def test_a_gateway_that_never_disappears_times_out(self):

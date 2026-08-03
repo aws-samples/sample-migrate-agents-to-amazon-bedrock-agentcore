@@ -11,15 +11,13 @@ task is done, and the code that used to encode that decision stops existing.
 Stage 1 shows the branch surviving a migration untouched; stage 2 is choosing to
 give it up, which is a different thing from being forced to.
 
-Guardrails and Policy are layered on once you are already here. Neither one
-required the rebuild:
+Policy in Amazon Bedrock AgentCore (policy/) is layered on once you are already
+here. It filters the tool surface: it evaluates Cedar rules on every tool call
+through the Gateway stage 1 created, so the agent diff for it is empty — the rule
+lives outside the agent entirely.
 
-- Bedrock Guardrails (guardrail.py) filters the model surface. It is an Amazon
-  Bedrock feature rather than an AgentCore one, it attaches to the model rather
-  than to the agent, and the same two parameters would have worked on stage 1.
-- Policy in Amazon Bedrock AgentCore (policy/) filters the tool surface. It
-  evaluates Cedar rules on every tool call through the Gateway stage 1 created,
-  so the agent diff for it is empty: the rule lives outside the agent entirely.
-
-One protects what the model may say, the other protects what a caller may do.
+Policy is the one control in this sample a reader cannot obtain without
+migrating. Bedrock Guardrails, for contrast, works on any Bedrock call today with
+no Runtime, no Gateway and no Policy, so it is not a reason to migrate and this
+sample does not ship one. docs/security-comparison.md makes that comparison.
 """

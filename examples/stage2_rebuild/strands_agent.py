@@ -15,8 +15,6 @@ from bedrock_agentcore.memory.integrations.strands.session_manager import (
 from strands import Agent
 from strands.tools import tool
 
-from examples.stage2_rebuild.guardrail import guarded_model
-
 MODEL_ID = "us.anthropic.claude-sonnet-5"
 SYSTEM_PROMPT = "You are a customer support assistant for ExampleCorp."
 
@@ -59,7 +57,6 @@ def build_agent(
     actor_id: Optional[str] = None,
     extra_tools: Optional[Sequence] = None,
     region_name: str = "us-east-1",
-    model=None,
 ) -> Agent:
     """Construct the customer support agent, optionally backed by AgentCore Memory.
 
@@ -75,11 +72,6 @@ def build_agent(
     Only lookup_order and process_return moved to the gateway; search_faq stayed
     local through every stage, and the agent has to keep offering all three or
     the rebuild has quietly dropped a capability stages 0 and 1 had.
-
-    ``model`` overrides the bare model id, and the only reason it exists is
-    guardrail.guarded_model(): a BedrockModel carrying guardrail_id and
-    guardrail_version. Left as None the agent behaves exactly as it did before
-    the guardrail existed.
     """
     tools = [lookup_order, process_return, search_faq]
     if extra_tools:
@@ -90,7 +82,7 @@ def build_agent(
         tools = [t for t in tools if t.tool_name not in superseded] + gateway_tools
 
     kwargs = {
-        "model": model or MODEL_ID,
+        "model": MODEL_ID,
         "system_prompt": SYSTEM_PROMPT,
         "tools": tools,
     }
@@ -129,27 +121,14 @@ def support_agent(session_id: str) -> Agent:
     so the cache is keyed on the session.
     """
     if session_id not in _agents:
-        # Set BEDROCK_GUARDRAIL_ID (plus BEDROCK_GUARDRAIL_VERSION, default "1")
-        # to run the model calls behind the guardrail, and AGENTCORE_MEMORY_ID
-        # (plus AGENTCORE_ACTOR_ID) to back the agent with AgentCore Memory. Both
-        # are configuration: unset, this is the same agent it was before either
-        # existed.
-        guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID")
+        # Set AGENTCORE_MEMORY_ID (plus AGENTCORE_ACTOR_ID) to back the agent with
+        # AgentCore Memory. It is configuration: unset, this is the same agent it
+        # was before memory existed.
         _agents[session_id] = build_agent(
             memory_id=os.environ.get("AGENTCORE_MEMORY_ID"),
             session_id=session_id,
             actor_id=os.environ.get("AGENTCORE_ACTOR_ID"),
             region_name=os.environ.get("AWS_REGION", "us-east-1"),
-            model=(
-                guarded_model(
-                    guardrail_id,
-                    MODEL_ID,
-                    guardrail_version=os.environ.get("BEDROCK_GUARDRAIL_VERSION", "1"),
-                    region_name=os.environ.get("AWS_REGION", "us-east-1"),
-                )
-                if guardrail_id
-                else None
-            ),
         )
     return _agents[session_id]
 

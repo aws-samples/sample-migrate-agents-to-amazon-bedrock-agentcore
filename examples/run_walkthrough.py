@@ -27,11 +27,10 @@ object in this process was holding.
 
 Stage 2 rebuilds the agent on the Strands Agents SDK and hardens it. The graph and
 its hand-written router are gone, replaced by a model-driven loop over the same
-Gateway tools and the same memory resource, and two security features are layered
-on: a Bedrock Guardrail on the model, and Cedar rules in Policy in AgentCore on
-the tool calls.
+Gateway tools and the same memory resource, and one security feature is layered
+on: Cedar rules in Policy in AgentCore on the tool calls.
 
-    create guardrail -> build the Strands agent behind it
+    build the Strands agent
         -> register Cedar rules and attach them to the gateway in ENFORCE mode
         -> invoke, then call one permitted and one denied tool
 
@@ -40,9 +39,9 @@ same two ARNs. It has its own entry point at
 examples/stage2_rebuild/strands_agent.py for deploying it to Runtime.
 
 Pass --teardown to delete what ran: the gateway target, the gateway, the memory,
-the guardrail, then the Cedar policies and their engine. Every step is attempted
-even if an earlier one failed, because a delete that skips the rest of the list is
-how resources get orphaned. The Lambda and the two IAM roles come from
+then the Cedar policies and their engine. Every step is attempted even if an
+earlier one failed, because a delete that skips the rest of the list is how
+resources get orphaned. The Lambda and the two IAM roles come from
 examples/gateway/lambda_target/deploy.sh and are not deleted here.
 """
 
@@ -66,11 +65,6 @@ from examples.stage0_langgraph.local_api import running_stub
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
 from examples.stage1_replatform.agentcore_memory_saver import AgentCoreMemorySaver
 from examples.stage1_replatform.langchain_mcp_tools import merge_tools, to_langchain_tools
-from examples.stage2_rebuild.guardrail import (
-    create_guardrail,
-    delete_guardrail,
-    guarded_model,
-)
 from examples.stage2_rebuild.policy.attach_policy import (
     caller_principal,
     call_tool_through_gateway,
@@ -172,22 +166,20 @@ def teardown(
     target_id: str,
     memory_id: str,
     region_name: str,
-    guardrail_id: str = "",
     policy_engine_id: str = "",
     policy_ids: Sequence[str] = (),
 ) -> None:
     """Delete everything the walkthrough created, in dependency order.
 
-    Target, then gateway, then memory, then guardrail, then the Cedar policies and
-    last their engine. The first two are ordered by the service — a gateway with a
-    target attached will not delete — and the engine goes after the gateway that
+    Target, then gateway, then memory, then the Cedar policies and last their
+    engine. The first two are ordered by the service — a gateway with a target
+    attached will not delete — and the engine goes after the gateway that
     referenced it.
 
     Every step is attempted even when an earlier one raises, and the failures are
     collected and re-raised together at the end. A teardown that stops at its first
     error is how a run orphans a gateway behind a target that would not delete, and
-    adding a guardrail to the end of a fail-fast sequence would have made a
-    billable resource the most likely thing to survive.
+    it leaves whatever came after that step in the list behind too.
     """
     control = boto3.client("bedrock-agentcore-control", region_name=region_name)
     steps = []
@@ -197,10 +189,6 @@ def teardown(
         steps.append(("gateway", lambda: _delete_gateway(control, gateway_id)))
     if memory_id:
         steps.append(("memory", lambda: _delete_memory(memory_id, region_name)))
-    if guardrail_id:
-        steps.append(
-            ("guardrail", lambda: delete_guardrail(guardrail_id, region_name))
-        )
     if policy_ids:
         steps.append(
             (
@@ -341,17 +329,14 @@ def run_stage2(
     region_name: str,
     created: dict,
 ) -> None:
-    """Stage 2: the Strands rebuild, behind a Guardrail, with Cedar on its tools.
+    """Stage 2: the Strands rebuild, with Cedar on its tools.
 
     ``created`` is filled in as each resource comes up rather than returned at the
     end, so that a failure part way through still leaves teardown able to delete
-    what exists. A guardrail created and then lost to an exception is a resource
-    that bills until someone finds it.
+    what exists. A policy engine created and then lost to an exception is a
+    resource nobody knows to look for.
     """
-    print("\n=== stage 2: Strands rebuild + Guardrails + Policy ===")
-
-    guardrail_id, guardrail_version = create_guardrail(region_name=region_name)
-    created["guardrail_id"] = guardrail_id
+    print("\n=== stage 2: Strands rebuild + Policy ===")
 
     read_only = caller_principal(region_name)
     privileged = support_agent_principal(region_name)
@@ -372,21 +357,11 @@ def run_stage2(
             actor_id=actor_id,
             extra_tools=mcp_client.list_tools_sync(),
             region_name=region_name,
-            model=guarded_model(
-                guardrail_id, MODEL_ID, guardrail_version, region_name
-            ),
         )
         # get_all_tools_config() is keyed by tool name, so the keys are the names.
         print(f"tools: {sorted(agent.tool_registry.get_all_tools_config())}")
 
         _ask_strands(agent, f"Hi, I'm Dana. Where is my order {DEMO_ORDER_ID}?")
-        # The guardrail's PII rule, not a prompt instruction: the card number is
-        # replaced before the model sees it, and the return still goes through.
-        _ask_strands(
-            agent,
-            f"Return order {DEMO_ORDER_ID}. It was charged to card "
-            "4111 1111 1111 1111, refund that.",
-        )
     finally:
         mcp_client.stop(None, None, None)
 
@@ -457,7 +432,6 @@ def run(args: argparse.Namespace) -> None:
                 target_id,
                 memory_id,
                 region,
-                guardrail_id=created.get("guardrail_id", ""),
                 policy_engine_id=created.get("policy_engine_id", ""),
                 policy_ids=created.get("policy_ids", ()),
             )
@@ -509,8 +483,8 @@ def main() -> None:
         "--teardown",
         action="store_true",
         help=(
-            "Delete the gateway target, gateway, memory, guardrail and Cedar "
-            "policies after running."
+            "Delete the gateway target, gateway, memory and Cedar policies after "
+            "running."
         ),
     )
     args = parser.parse_args()

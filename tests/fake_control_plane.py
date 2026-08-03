@@ -1,15 +1,15 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Fake bedrock and bedrock-agentcore-control clients for the stage-2 tests.
+"""A fake bedrock-agentcore-control client for the stage-2 tests.
 
 No AWS calls. Every request is recorded so a test can assert what would have been
 sent, and the behaviours that are faked are the ones measured live during the
 walkthrough rather than the happy path:
 
-1. Creation is asynchronous. A new guardrail reports CREATING, and a new policy
-   engine reports CREATING, for a settable number of Get calls before going
-   READY / ACTIVE. Code that skips the waiter sees a resource it cannot use yet.
+1. Creation is asynchronous. A new policy engine reports CREATING for a settable
+   number of Get calls before going ACTIVE. Code that skips the waiter sees a
+   resource it cannot use yet.
 2. Deletion is asynchronous, and worse, a Get can still succeed after the delete
    returned. ``delete_lag`` controls how many Get calls succeed before
    ResourceNotFoundException, so a teardown that trusts the delete call rather
@@ -17,8 +17,6 @@ walkthrough rather than the happy path:
 3. DeleteGateway raised ValidationException while ListGatewayTargets already
    returned []. ``validation_failures`` reproduces that: the first N deletes
    raise ValidationException whatever the target list says.
-4. ListGuardrails returns one entry per version, so a guardrail that exists only
-   as DRAFT is a real state the create path has to handle.
 
 FakeClock replaces the module-level ``time`` in the code under test, so waiter
 loops finish instantly and a timeout is reachable without waiting for one.
@@ -44,14 +42,6 @@ class ResourceNotFoundException(Exception):
     pass
 
 
-class ResourceInUseException(Exception):
-    pass
-
-
-class ConflictException(Exception):
-    pass
-
-
 class ValidationException(Exception):
     pass
 
@@ -60,8 +50,6 @@ class _Exceptions:
     """The client.exceptions namespace botocore generates per service."""
 
     ResourceNotFoundException = ResourceNotFoundException
-    ResourceInUseException = ResourceInUseException
-    ConflictException = ConflictException
     ValidationException = ValidationException
 
 
@@ -80,112 +68,6 @@ class _Paginator:
             return
         for start in range(0, len(items), self.page_size):
             yield {self.key: items[start : start + self.page_size]}
-
-
-class FakeBedrockClient:
-    """The guardrail control plane: create, version, get, list, delete."""
-
-    exceptions = _Exceptions
-
-    def __init__(self, ready_after=1, delete_lag=1, in_use_failures=0):
-        # Guardrail id -> {"name", "config", "versions": [str], "status_gets"}
-        self.guardrails = {}
-        self.ready_after = ready_after
-        self.delete_lag = delete_lag
-        self.in_use_failures = in_use_failures
-        self.calls = []
-        self.deleted = []
-        self._next_id = 0
-        self._get_counts = {}
-        self._delete_gets = {}
-
-    # -- helpers a test uses to set the starting state -------------------------
-
-    def seed(self, name, versions=("1",), guardrail_id=None):
-        """Pretend a guardrail already exists, optionally DRAFT-only."""
-        guardrail_id = guardrail_id or self._make_id()
-        self.guardrails[guardrail_id] = {
-            "name": name,
-            "config": {},
-            "versions": ["DRAFT", *versions],
-        }
-        self._get_counts[guardrail_id] = self.ready_after
-        return guardrail_id
-
-    def _make_id(self):
-        self._next_id += 1
-        return f"gr-{self._next_id:012d}"
-
-    # -- the API --------------------------------------------------------------
-
-    def create_guardrail(self, **kwargs):
-        self.calls.append(("create_guardrail", kwargs))
-        guardrail_id = self._make_id()
-        self.guardrails[guardrail_id] = {
-            "name": kwargs["name"],
-            "config": kwargs,
-            "versions": ["DRAFT"],
-        }
-        self._get_counts[guardrail_id] = 0
-        return {"guardrailId": guardrail_id, "version": "DRAFT"}
-
-    def create_guardrail_version(self, **kwargs):
-        self.calls.append(("create_guardrail_version", kwargs))
-        guardrail = self._require(kwargs["guardrailIdentifier"])
-        numbered = [v for v in guardrail["versions"] if v.isdigit()]
-        version = str(max((int(v) for v in numbered), default=0) + 1)
-        guardrail["versions"].append(version)
-        # Versioning puts the guardrail back into a non-READY status.
-        self._get_counts[kwargs["guardrailIdentifier"]] = 0
-        return {"version": version}
-
-    def get_guardrail(self, **kwargs):
-        self.calls.append(("get_guardrail", kwargs))
-        guardrail_id = kwargs["guardrailIdentifier"]
-        if guardrail_id in self.deleted:
-            remaining = self._delete_gets.get(guardrail_id, 0)
-            if remaining <= 0:
-                raise ResourceNotFoundException(f"{guardrail_id} not found")
-            self._delete_gets[guardrail_id] = remaining - 1
-            return {"guardrailId": guardrail_id, "status": "DELETING"}
-        guardrail = self._require(guardrail_id)
-        seen = self._get_counts[guardrail_id]
-        self._get_counts[guardrail_id] = seen + 1
-        status = "READY" if seen >= self.ready_after else "CREATING"
-        return {"guardrailId": guardrail_id, "status": status, **guardrail["config"]}
-
-    def get_paginator(self, name):
-        if name != "list_guardrails":
-            raise ValueError(f"Unfaked paginator: {name}")
-        return _Paginator("guardrails", self._guardrail_summaries)
-
-    def _guardrail_summaries(self):
-        # One entry per version, which is what makes DRAFT-only detectable.
-        return [
-            {"id": guardrail_id, "name": guardrail["name"], "version": version}
-            for guardrail_id, guardrail in self.guardrails.items()
-            if guardrail_id not in self.deleted
-            for version in guardrail["versions"]
-        ]
-
-    def delete_guardrail(self, **kwargs):
-        self.calls.append(("delete_guardrail", kwargs))
-        guardrail_id = kwargs["guardrailIdentifier"]
-        if guardrail_id in self.deleted:
-            raise ResourceNotFoundException(f"{guardrail_id} not found")
-        if guardrail_id not in self.guardrails:
-            raise ResourceNotFoundException(f"{guardrail_id} not found")
-        if self.in_use_failures > 0:
-            self.in_use_failures -= 1
-            raise ResourceInUseException(f"{guardrail_id} is in use")
-        self.deleted.append(guardrail_id)
-        self._delete_gets[guardrail_id] = self.delete_lag
-        return {}
-
-    def _require(self, guardrail_id):
-        if guardrail_id not in self.guardrails or guardrail_id in self.deleted:
-            raise ResourceNotFoundException(f"{guardrail_id} not found")
-        return self.guardrails[guardrail_id]
 
 
 class FakeAgentCoreControlClient:
