@@ -46,7 +46,7 @@ import subprocess
 import sys
 import time
 import zipfile
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import boto3
 
@@ -394,14 +394,29 @@ def wait_ready(control, runtime_id: str, timeout: int = 420) -> float:
     raise TimeoutError(f"Runtime {runtime_id} not READY after {timeout}s")
 
 
+class DeployTimings(NamedTuple):
+    """The two halves of a deploy, kept apart because they are not comparable.
+
+    Reporting one number for the whole of ``deploy`` overstates what AgentCore
+    costs by however long pip took: on a cold run the packaging half was 35s of a
+    50s deploy, and 35 of those seconds were a local wheel download that would be
+    the same if the target were a bare EC2 box. ``provisioning`` is the number that
+    is about the service, and it is the one the walkthrough labels as such.
+    """
+
+    packaging: float  # build_zip, bucket, role, upload -- local, pip-dominated
+    provisioning: float  # the create or update call through READY
+    role_waits: int  # IAM propagation retries inside provisioning, usually 0
+
+
 def deploy(
     gateway_url: str,
     memory_id: str,
     actor_id: str = "langgraph",
     region_name: str = "us-east-1",
     force_build: bool = False,
-) -> Tuple[str, str, float]:
-    """Build, upload and deploy. Returns (runtimeId, runtimeArn, seconds to READY).
+) -> Tuple[str, str, DeployTimings]:
+    """Build, upload and deploy. Returns (runtimeId, runtimeArn, DeployTimings).
 
     Config reaches the agent through environmentVariables, which is how
     agent_runtime.py:58 and :85 read GATEWAY_URL and AGENTCORE_MEMORY_ID. That is
@@ -414,6 +429,7 @@ def deploy(
     iam = session.client("iam")
     control = session.client("bedrock-agentcore-control")
 
+    packaging_started = time.monotonic()
     zip_path, _ = build_zip(force=force_build)
     bucket = bucket_name(account_id)
     ensure_bucket(s3, bucket, region_name)
@@ -422,6 +438,7 @@ def deploy(
     key = "agent.zip"
     s3.upload_file(zip_path, bucket, key)
     print(f"Uploaded s3://{bucket}/{key}")
+    packaging = time.monotonic() - packaging_started
 
     artifact = {
         "codeConfiguration": {
@@ -443,7 +460,12 @@ def deploy(
         },
     }
 
+    # Outside the provisioning clock: a ListAgentRuntimes is a lookup, and on the
+    # update branch it is the call that decides which of the two branches is timed.
     existing = _find_existing_runtime(control, RUNTIME_NAME)
+
+    role_waits = 0
+    provisioning_started = time.monotonic()
     if existing is not None:
         # A re-run points the same runtime at the freshly uploaded zip rather than
         # failing on the duplicate name or leaving a stale artifact deployed.
@@ -454,18 +476,27 @@ def deploy(
             "agentRuntimeArn"
         ]
     else:
-        created = _create_when_the_role_is_visible(control, common)
+        created, role_waits = _create_when_the_role_is_visible(control, common)
         runtime_id = created["agentRuntimeId"]
         runtime_arn = created["agentRuntimeArn"]
         print(f"Created runtime {RUNTIME_NAME}: {runtime_id}")
 
     elapsed = wait_ready(control, runtime_id)
     print(f"Runtime READY in {elapsed:.1f}s")
-    return runtime_id, runtime_arn, elapsed
+    # Deliberately not `elapsed`: the caller's row is labelled from the create call
+    # to READY, and on a cold role the wait for IAM happens between the two.
+    provisioning = time.monotonic() - provisioning_started
+    return runtime_id, runtime_arn, DeployTimings(packaging, provisioning, role_waits)
 
 
-def _create_when_the_role_is_visible(control, common: dict, timeout: int = 120) -> dict:
+def _create_when_the_role_is_visible(
+    control, common: dict, timeout: int = 120
+) -> Tuple[dict, int]:
     """CreateAgentRuntime, retrying while IAM has not yet propagated the role.
+
+    Returns the response and how many attempts it cost, because the retries land
+    inside the caller's provisioning measurement and a five-second sleep is a third
+    of what provisioning otherwise takes.
 
     ensure_role returns as soon as CreateRole does, but the role is not yet visible
     to other services, and CreateAgentRuntime validates it by trying to assume it.
@@ -487,7 +518,10 @@ def _create_when_the_role_is_visible(control, common: dict, timeout: int = 120) 
     attempts = 0
     while True:
         try:
-            return control.create_agent_runtime(agentRuntimeName=RUNTIME_NAME, **common)
+            response = control.create_agent_runtime(
+                agentRuntimeName=RUNTIME_NAME, **common
+            )
+            return response, attempts
         except control.exceptions.ValidationException as error:
             attempts += 1
             if "Role validation failed" not in str(error):

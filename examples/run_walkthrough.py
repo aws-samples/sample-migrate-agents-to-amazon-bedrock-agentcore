@@ -464,6 +464,10 @@ def deploy_to_runtime(
     need a registry and an ARM64 builder, which is a different article -- but the
     zip path needs neither, so the reason no longer applies.
 
+    Five rows rather than four: the fifth is the local packaging cost, split out
+    after a cold run reported 50.5s under a CreateAgentRuntime label for a create
+    the same log said reached READY in 15.4s. The difference was pip.
+
     Invoked twice on one runtimeSessionId, because cold and warm differ by whether
     a microVM is already running and the session id is what routes to it. The id is
     padded: InvokeAgentRuntime rejects anything shorter than 33 characters, and it
@@ -474,15 +478,39 @@ def deploy_to_runtime(
     # createdAt -> lastUpdatedAt delta means something different on each branch.
     was_already_there = deploy_runtime.existing_runtime_id(region_name) is not None
 
+    # Two rows out of one call, because the wall clock across deploy() is not a
+    # number about AgentCore: most of it is pip downloading wheels. The composite is
+    # still reported -- it is what a reader waits through, and it is the row that
+    # turns into a "time to FAIL" marker if the deploy raises.
     with _optional_timing(
         measured,
-        "runtime CreateAgentRuntime -> READY",
-        f"{REUSED}: the zip upload, an UpdateAgentRuntime and its wait"
-        if was_already_there
-        else PROVISIONED,
+        "runtime deploy, zip build through READY",
+        "packaging and provisioning together, split in the two rows below",
     ):
-        runtime_id, runtime_arn, _ = deploy_runtime.deploy(
+        runtime_id, runtime_arn, timings = deploy_runtime.deploy(
             gateway_url, memory_id, actor_id, region_name
+        )
+    if measured is not None:
+        provisioning_note = (
+            f"{REUSED}: an UpdateAgentRuntime and its wait"
+            if was_already_there
+            else PROVISIONED
+        )
+        if timings.role_waits:
+            provisioning_note += (
+                f", including {timings.role_waits} wait(s) for IAM to propagate the role"
+            )
+        measured.record(
+            "runtime CreateAgentRuntime -> READY",
+            round(timings.provisioning, 1),
+            "s",
+            provisioning_note,
+        )
+        measured.record(
+            "runtime zip build + upload",
+            round(timings.packaging, 1),
+            "s",
+            "local, pip-dominated; a cached artifact skips the vendoring",
         )
     if created is not None:
         created["runtime_id"] = runtime_id

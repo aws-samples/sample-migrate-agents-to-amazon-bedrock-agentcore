@@ -1637,17 +1637,47 @@ class ProvisioningLabelTest(unittest.TestCase):
             )
         return sites
 
+    def record_call_sites(self):
+        """Every ``.record(label, ...)`` call, as (name, has a note).
+
+        The runtime's provisioning number is not timed by _optional_timing at all:
+        deploy() hands back a split, and the walkthrough records the provisioning
+        half directly so the wall-clock row does not charge pip to the service. A
+        note here is the fourth positional argument or a ``note=`` keyword.
+        """
+        sites = []
+        for node in ast.walk(ast.parse(inspect.getsource(run_walkthrough))):
+            if not isinstance(node, ast.Call):
+                continue
+            if getattr(node.func, "attr", None) != "record":
+                continue
+            label = node.args[0] if node.args else None
+            sites.append(
+                (
+                    label.value if isinstance(label, ast.Constant) else "<computed>",
+                    len(node.args) > 3 or any(kw.arg == "note" for kw in node.keywords),
+                )
+            )
+        return sites
+
     def test_every_timing_that_names_a_resource_says_which_branch_it_took(self):
         """A later edit that adds a fifth timed create, or drops a note from one
-        of the four, puts an unlabelled provisioning number back in the table."""
-        sites = self.timing_call_sites()
+        of the four, puts an unlabelled provisioning number back in the table.
+
+        The four provisioning numbers the article quotes now reach the table two
+        ways: three through _optional_timing, and the runtime's through .record,
+        because pip's contribution had to be split off it. Both are searched, so
+        moving a row between the two mechanisms cannot drop it from this check.
+        """
+        every = self.timing_call_sites() + self.record_call_sites()
         provisioning = [
             (name, noted)
-            for name, noted in sites
-            if "Create" in name or name == "target registration"
+            for name, noted in every
+            if ("Create" in name and "zip build" not in name)
+            or name == "target registration"
         ]
 
-        self.assertEqual(len(provisioning), 4, dict(sites))
+        self.assertEqual(len(provisioning), 4, dict(every))
         for name, noted in provisioning:
             self.assertTrue(noted, f"{name} claims a create with no branch note")
 
@@ -1655,7 +1685,7 @@ class ProvisioningLabelTest(unittest.TestCase):
         # have no create to disclaim. Named here so that a new provisioning
         # timing cannot arrive unnoticed by being neither.
         self.assertEqual(
-            sorted(name for name, noted in sites if not noted),
+            sorted(name for name, noted in self.timing_call_sites() if not noted),
             [
                 "stage 0 turn, local tools + in-process state",
                 "stage 1 turn, Gateway tools + AgentCore Memory",

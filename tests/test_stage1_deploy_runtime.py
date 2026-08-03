@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 from examples.stage1_replatform import deploy_runtime
+from tests.fake_control_plane import FakeClock
 
 
 def elf_header(machine: int) -> bytes:
@@ -390,51 +391,63 @@ class InvokeFailureTest(unittest.TestCase):
         self.assertEqual(self.explain("AccessDeniedException"), "")
 
 
+def install_deploy_doubles(test, build=None) -> None:
+    """Point deploy() at doubles for every client it makes, and stub the build.
+
+    A function rather than a base class so that the timing tests can reuse the
+    doubles without also re-running every assertion in DeployTest against them:
+    a test count that grows because a class was subclassed is a test count that
+    lies about how much is covered.
+    """
+    test.control = FakeRuntimeControlClient()
+    test.s3 = FakeS3Client()
+    test.iam = FakeIAMClient()
+    test.sts = mock.Mock(get_caller_identity=lambda: {"Account": "123456789012"})
+    clients = {
+        "s3": test.s3, "iam": test.iam,
+        "bedrock-agentcore-control": test.control, "sts": test.sts,
+    }
+    session = mock.Mock(client=lambda name, **kw: clients[name])
+    patcher = mock.patch.object(deploy_runtime.boto3, "Session", lambda **kw: session)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    if build is None:
+        build = lambda force=False: ("/tmp/agent.zip", False)  # noqa: E731
+    patched_build = mock.patch.object(deploy_runtime, "build_zip", build)
+    patched_build.start()
+    test.addCleanup(patched_build.stop)
+
+
+def run_deploy(test):
+    """deploy() against the doubles, returning (result, what it printed)."""
+    with redirect_stdout(io.StringIO()) as out:
+        result = deploy_runtime.deploy(
+            "https://gateway.example/mcp", "MigratedAgentMemory-abc123"
+        )
+    return result, out.getvalue()
+
+
 class DeployTest(unittest.TestCase):
     """The create/update branch and the request codeConfiguration is given."""
 
     def setUp(self):
-        self.control = FakeRuntimeControlClient()
-        self.s3 = FakeS3Client()
-        self.iam = FakeIAMClient()
-        self.sts = mock.Mock(
-            get_caller_identity=lambda: {"Account": "123456789012"}
-        )
-        clients = {
-            "s3": self.s3, "iam": self.iam,
-            "bedrock-agentcore-control": self.control, "sts": self.sts,
-        }
-        session = mock.Mock(client=lambda name, **kw: clients[name])
-        patcher = mock.patch.object(
-            deploy_runtime.boto3, "Session", lambda **kw: session
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        build = mock.patch.object(
-            deploy_runtime, "build_zip", lambda force=False: ("/tmp/agent.zip", False)
-        )
-        build.start()
-        self.addCleanup(build.stop)
+        install_deploy_doubles(self)
         sleep = mock.patch.object(deploy_runtime.time, "sleep", lambda s: None)
         sleep.start()
         self.addCleanup(sleep.stop)
 
     def deploy(self):
-        with redirect_stdout(io.StringIO()) as out:
-            result = deploy_runtime.deploy(
-                "https://gateway.example/mcp", "MigratedAgentMemory-abc123"
-            )
-        return result, out.getvalue()
+        return run_deploy(self)
 
     def sent(self, operation):
         return [kw for name, kw in self.control.calls if name == operation][0]
 
     def test_creates_a_runtime_when_none_exists(self):
-        (runtime_id, runtime_arn, elapsed), _ = self.deploy()
+        (runtime_id, runtime_arn, timings), _ = self.deploy()
         self.assertEqual([n for n, _ in self.control.calls][0], "create_agent_runtime")
         self.assertTrue(runtime_id.startswith(deploy_runtime.RUNTIME_NAME))
         self.assertIn("runtime/", runtime_arn)
-        self.assertGreaterEqual(elapsed, 0)
+        self.assertGreaterEqual(timings.provisioning, 0)
 
     def test_reuses_and_updates_an_existing_runtime(self):
         """A second --stage all must not fail on the duplicate name."""
@@ -548,10 +561,60 @@ class DeployTest(unittest.TestCase):
 
     def test_it_waits_through_creating(self):
         self.control.statuses = ["CREATING", "CREATING", "READY"]
-        (_, _, elapsed), _ = self.deploy()
+        (_, _, timings), _ = self.deploy()
         gets = [n for n, _ in self.control.calls if n == "get_agent_runtime"]
         self.assertGreaterEqual(len(gets), 3)
-        self.assertIsInstance(elapsed, float)
+        self.assertIsInstance(timings.provisioning, float)
+
+
+class DeployTimingSplitTest(unittest.TestCase):
+    """The two halves of a deploy are measured apart, and stay apart.
+
+    The cold live run reported 50.5s under a "CreateAgentRuntime -> READY" label
+    for a create the same log said reached READY in 15.4s. The missing 35s was pip
+    downloading aarch64 wheels -- a local cost, identical if the target were a bare
+    EC2 box, and not a fact about AgentCore. Packaging is made expensive here and
+    provisioning cheap, so a number that mixes the two cannot pass by accident.
+
+    The fake clock only advances when something sleeps on it, so wall time is a
+    deterministic sum of the build's 30s and the retry loop's 5s-per-attempt --
+    no real seconds pass and the split is exact rather than approximate.
+    """
+
+    def setUp(self):
+        self.clock = FakeClock()
+        self.addCleanup(setattr, deploy_runtime, "time", deploy_runtime.time)
+        deploy_runtime.time = self.clock
+
+        def slow_build(force=False):
+            self.clock.sleep(30)
+            return "/tmp/agent.zip", False
+
+        install_deploy_doubles(self, build=slow_build)
+
+    def test_the_pip_vendoring_is_not_charged_to_createagentruntime(self):
+        (_, _, timings), _ = run_deploy(self)
+        self.assertEqual(timings.packaging, 30)
+        self.assertEqual(timings.provisioning, 0)
+
+    def test_the_wait_for_iam_is_inside_provisioning_and_counted(self):
+        """Not hidden: two retries are 10s of a number otherwise near zero."""
+        self.control.role_not_propagated = 2
+        (_, _, timings), _ = run_deploy(self)
+        self.assertEqual(timings.role_waits, 2)
+        self.assertEqual(timings.provisioning, 10)
+
+    def test_a_create_that_needed_no_retry_reports_no_wait(self):
+        (_, _, timings), _ = run_deploy(self)
+        self.assertEqual(timings.role_waits, 0)
+
+    def test_an_update_run_has_no_role_wait_to_report(self):
+        """Only the create is retried, so the update branch can only report zero."""
+        self.control.existing = {
+            "MigratedAgentRuntime-existing1": {"name": deploy_runtime.RUNTIME_NAME}
+        }
+        (_, _, timings), _ = run_deploy(self)
+        self.assertEqual(timings.role_waits, 0)
 
 
 class RoleAndBucketTest(unittest.TestCase):
