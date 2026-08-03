@@ -44,7 +44,7 @@ if command -v aws &>/dev/null && aws sts get-caller-identity &>/dev/null; then
     echo "[OK] AWS credentials configured"
 else
     echo "[WARN] No usable AWS credentials. Run 'aws configure'. This does not block setup:"
-    echo "       python -m pytest tests/ -q                      works without credentials"
+    echo "       python -m unittest discover -s tests             works without credentials"
     echo "       python -m examples.stage0_langgraph.run_local    fails without Bedrock model access"
     echo "       examples/run_walkthrough.py                      creates real AWS resources"
 fi
@@ -67,7 +67,7 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "To activate the environment: source .venv/bin/activate"
-echo "Then the offline suite:      python -m pytest tests/ -q"
+echo "Then the offline suite:      python -m unittest discover -s tests -v"
 echo "Then the stage-0 agent:      python -m examples.stage0_langgraph.run_local"
 echo ""
 echo "run_local.py is the agent before any migration. It needs Bedrock model access and"

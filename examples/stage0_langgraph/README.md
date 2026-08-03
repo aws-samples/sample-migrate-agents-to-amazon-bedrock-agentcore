@@ -57,7 +57,10 @@ python -m unittest discover -s tests -v
 ```
 
 Live against Bedrock, needs credentials and model access for
-`us.anthropic.claude-sonnet-5`:
+`us.anthropic.claude-sonnet-5`. That `us.` prefix is a cross-region inference
+profile and `run_local.py` defaults to `us-east-1`, so set `AWS_REGION` to a US
+region — or change `MODEL_ID` to a profile your region carries, since a mismatch
+comes back as a model-access error rather than a region one:
 
 ```bash
 python -m examples.stage0_langgraph.run_local

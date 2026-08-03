@@ -122,14 +122,20 @@ pip install -r requirements.txt
 
 ```bash
 source .venv/bin/activate
-python -m pytest tests/ -q
+python -m unittest discover -s tests -v
 ```
+
+The suite is `unittest`, and that command needs nothing beyond `requirements.txt`. `pytest tests/ -q`
+runs it too and prints less, but pytest is not a declared dependency, so `./setup.sh` does not install
+it.
 
 4. Run the stage-0 agent — the agent before any migration, and the last step that creates nothing in
    your account. **Needs AWS credentials and Amazon Bedrock model access for the model named in
    `examples/stage0_langgraph/run_local.py`, and nothing else:** no Gateway, no Memory, no Runtime, no
-   Policy. It starts its own orders-API stub on a loopback port, so this one command is the whole of
-   it:
+   Policy. That model id is a `us.` cross-region inference profile and the region defaults to
+   `us-east-1`, so set `AWS_REGION` to a US region — or change `MODEL_ID` to a profile your region
+   carries, since a mismatch surfaces as a model-access error rather than as a region one. It starts
+   its own orders-API stub on a loopback port, so this one command is the whole of it:
 
 ```bash
 python -m examples.stage0_langgraph.run_local
