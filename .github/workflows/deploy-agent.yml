@@ -1,17 +1,27 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-# Deploy an AI agent to Amazon Bedrock AgentCore using GitHub Actions.
-# This workflow builds an ARM64 container, pushes it to Amazon ECR,
-# and deploys to AgentCore Runtime.
+# Deploy an AI agent to Amazon Bedrock AgentCore Runtime using GitHub Actions.
 #
-# This is a SAMPLE workflow for the blog post. It uses workflow_dispatch
-# (manual trigger) so it never runs automatically.
+# This deploys via CreateAgentRuntime with codeConfiguration: a zip of the agent
+# and its vendored dependencies, uploaded to Amazon S3. There is no container
+# build, no registry and no Node.js toolchain in this job -- pip is the only
+# build tool, and it cross-compiles the Linux ARM64 wheels Runtime needs from
+# whatever architecture the runner happens to be. See
+# examples/stage1_replatform/deploy_runtime.py for the packaging rules.
+#
+# This is a SAMPLE workflow for the blog post. The trigger is workflow_dispatch
+# and only workflow_dispatch, on purpose: a sample that fired on push would
+# deploy real AWS resources out of a reader's fork. Do not add other triggers.
 #
 # Prerequisites:
-#   - An IAM role configured for GitHub Actions OIDC federation
-#   - An Amazon ECR repository for your agent image
-#   - The AgentCore CLI installed (npm install -g @aws/agentcore)
+#   - An IAM role configured for GitHub Actions OIDC federation, stored as the
+#     AWS_ROLE_ARN secret. It needs more than a container push did: S3 (create
+#     the artifact bucket, put the object), IAM (create the Runtime execution
+#     role and attach its inline policy), bedrock-agentcore-control (create,
+#     update and read the runtime) and bedrock-agentcore (invoke it).
+#   - An AgentCore Gateway and an AgentCore Memory already created; this job
+#     takes their URL and id as inputs rather than creating them.
 #
 # For setup instructions, refer to:
 # https://aws.amazon.com/blogs/machine-learning/deploy-ai-agents-on-amazon-bedrock-agentcore-using-github-actions/
@@ -20,6 +30,15 @@ name: Deploy Agent to AgentCore
 
 on:
   workflow_dispatch:
+    inputs:
+      gateway_url:
+        description: "AgentCore Gateway MCP endpoint URL"
+        required: true
+        type: string
+      memory_id:
+        description: "AgentCore Memory id (for example MigratedAgentMemory-xxxx)"
+        required: true
+        type: string
 
 env:
   AWS_REGION: us-east-1
@@ -30,8 +49,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
-      contents: read
+      id-token: write # OIDC assume-role
+      contents: read # checkout
 
     steps:
       - name: Checkout code
@@ -43,25 +62,20 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@376925c9d111252e87ae59691e5a442dd100ef6a # v2.1.3
+      # boto3 only. The 196 MB of agent dependencies are not installed into the
+      # runner: deploy_runtime.py pip-installs them into a staging tree built for
+      # Linux ARM64 and zips that, so installing them here as host wheels would
+      # be both slower and the wrong architecture.
+      - name: Install boto3
+        run: python3 -m pip install --quiet boto3
 
-      - name: Build and push ARM64 image
-        env:
-          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker buildx create --use
-          docker buildx build \
-            --platform linux/arm64 \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
-            --push .
-
-      - name: Install AgentCore CLI
-        run: npm install -g @aws/agentcore
-
+      # Builds the zip, uploads it, creates or updates the runtime, waits for
+      # READY, then invokes it once. The invocation is deliberate: an artifact
+      # with the wrong binaries fails at create, but a missing vendored module
+      # only ever shows up on an invoke.
       - name: Deploy to AgentCore Runtime
-        run: agentcore deploy --yes
+        run: |
+          python3 -m examples.stage1_replatform.deploy_runtime \
+            --gateway-url "${{ inputs.gateway_url }}" \
+            --memory-id "${{ inputs.memory_id }}" \
+            --region "${{ env.AWS_REGION }}"
