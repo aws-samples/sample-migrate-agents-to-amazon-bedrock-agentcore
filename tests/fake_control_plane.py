@@ -20,7 +20,13 @@ walkthrough rather than the happy path:
 
 FakeClock replaces the module-level ``time`` in the code under test, so waiter
 loops finish instantly and a timeout is reachable without waiting for one.
+
+FakeIAMClient and FakeSTSClient cover the two demo principals stage 2 creates for
+its Cedar proof, including the AccessDenied a brand-new role returns while IAM
+converges.
 """
+
+import json as _json
 
 
 class FakeClock:
@@ -252,16 +258,172 @@ class FakeAgentCoreControlClient:
         return {}
 
 
-class FakeSTSClient:
-    """GetCallerIdentity only, returning an assumed-role ARN with a session name."""
+class NoSuchEntityException(Exception):
+    pass
 
-    def __init__(self, arn=None):
+
+class EntityAlreadyExistsException(Exception):
+    pass
+
+
+class ClientError(Exception):
+    """botocore's ClientError, with the response dict the retry logic reads."""
+
+    def __init__(self, code, message="denied"):
+        super().__init__(f"{code}: {message}")
+        self.response = {"Error": {"Code": code, "Message": message}}
+
+
+class _IamExceptions:
+    NoSuchEntityException = NoSuchEntityException
+    EntityAlreadyExistsException = EntityAlreadyExistsException
+    ClientError = ClientError
+
+
+class FakeIAMClient:
+    """Roles and their inline policies, enough for the two-principal Cedar proof.
+
+    PolicyDocument comes back as a dict rather than as the JSON string that was
+    put, because that is what botocore does: an after-call handler URL-decodes and
+    parses IAM policy documents. Code that compares two documents is therefore
+    comparing dicts, and a fake that returned strings would let a broken
+    comparison pass.
+    """
+
+    exceptions = _IamExceptions
+
+    def __init__(self, account_id="123456789012"):
+        self.account_id = account_id
+        self.roles = {}
+        self.inline = {}
+        self.attached = {}
+        self.calls = []
+
+    def create_role(self, **kwargs):
+        self.calls.append(("create_role", kwargs))
+        name = kwargs["RoleName"]
+        if name in self.roles:
+            raise EntityAlreadyExistsException(f"{name} exists")
+        self.roles[name] = {
+            "RoleName": name,
+            "Arn": f"arn:aws:iam::{self.account_id}:role/{name}",
+            "AssumeRolePolicyDocument": _json.loads(
+                kwargs["AssumeRolePolicyDocument"]
+            ),
+        }
+        self.inline.setdefault(name, {})
+        return {"Role": self.roles[name]}
+
+    def update_assume_role_policy(self, **kwargs):
+        self.calls.append(("update_assume_role_policy", kwargs))
+        self._role(kwargs["RoleName"])["AssumeRolePolicyDocument"] = _json.loads(
+            kwargs["PolicyDocument"]
+        )
+        return {}
+
+    def get_role(self, **kwargs):
+        self.calls.append(("get_role", kwargs))
+        return {"Role": self._role(kwargs["RoleName"])}
+
+    def put_role_policy(self, **kwargs):
+        self.calls.append(("put_role_policy", kwargs))
+        name = kwargs["RoleName"]
+        self._role(name)
+        self.inline.setdefault(name, {})[kwargs["PolicyName"]] = _json.loads(
+            kwargs["PolicyDocument"]
+        )
+        return {}
+
+    def get_role_policy(self, **kwargs):
+        self.calls.append(("get_role_policy", kwargs))
+        name, policy = kwargs["RoleName"], kwargs["PolicyName"]
+        self._role(name)
+        if policy not in self.inline.get(name, {}):
+            raise NoSuchEntityException(f"{policy} not found on {name}")
+        return {
+            "RoleName": name,
+            "PolicyName": policy,
+            "PolicyDocument": self.inline[name][policy],
+        }
+
+    def list_role_policies(self, **kwargs):
+        self.calls.append(("list_role_policies", kwargs))
+        name = kwargs["RoleName"]
+        self._role(name)
+        return {"PolicyNames": sorted(self.inline.get(name, {}))}
+
+    def list_attached_role_policies(self, **kwargs):
+        self.calls.append(("list_attached_role_policies", kwargs))
+        name = kwargs["RoleName"]
+        self._role(name)
+        return {"AttachedPolicies": self.attached.get(name, [])}
+
+    def delete_role_policy(self, **kwargs):
+        self.calls.append(("delete_role_policy", kwargs))
+        name = kwargs["RoleName"]
+        self._role(name)
+        self.inline.get(name, {}).pop(kwargs["PolicyName"], None)
+        return {}
+
+    def delete_role(self, **kwargs):
+        self.calls.append(("delete_role", kwargs))
+        name = kwargs["RoleName"]
+        self._role(name)
+        if self.inline.get(name):
+            raise ClientError(
+                "DeleteConflict", f"{name} must be empty before it can be deleted"
+            )
+        del self.roles[name]
+        self.inline.pop(name, None)
+        return {}
+
+    def _role(self, name):
+        if name not in self.roles:
+            raise NoSuchEntityException(f"{name} not found")
+        return self.roles[name]
+
+
+class FakeSTSClient:
+    """GetCallerIdentity, plus AssumeRole for the two-principal proof."""
+
+    exceptions = _IamExceptions
+
+    def __init__(self, arn=None, access_denied_times=0):
         self.arn = arn or (
             "arn:aws:sts::123456789012:assumed-role/SupportAgentRole/session-1"
         )
+        # How many AssumeRole calls fail with AccessDenied before one succeeds,
+        # which is what a role created seconds ago does while IAM converges.
+        self.access_denied_times = access_denied_times
+        self.assumed = []
 
     def get_caller_identity(self):
         return {"Arn": self.arn, "Account": "123456789012", "UserId": "AROAEXAMPLE"}
+
+    def assume_role(self, **kwargs):
+        if self.access_denied_times > 0:
+            self.access_denied_times -= 1
+            raise ClientError("AccessDenied", "not authorized to assume this role")
+        self.assumed.append(kwargs)
+        role = kwargs["RoleArn"].split("/")[-1]
+        return {
+            "Credentials": {
+                "AccessKeyId": f"ASIA{role}",
+                "SecretAccessKey": "secret",
+                "SessionToken": "token",
+            }
+        }
+
+
+class FakeSession:
+    """boto3.Session, for code that builds one rather than calling boto3.client."""
+
+    def __init__(self, boto3_stub, region_name=None):
+        self._boto3 = boto3_stub
+        self._region = region_name
+
+    def client(self, service_name, region_name=None, **kwargs):
+        return self._boto3.client(service_name, region_name or self._region, **kwargs)
 
 
 class FakeBoto3:
@@ -276,3 +438,6 @@ class FakeBoto3:
         if service_name not in self.clients:
             raise AssertionError(f"Unexpected AWS client requested: {service_name}")
         return self.clients[service_name]
+
+    def Session(self, region_name=None, **kwargs):  # noqa: N802 - boto3's own name
+        return FakeSession(self, region_name)

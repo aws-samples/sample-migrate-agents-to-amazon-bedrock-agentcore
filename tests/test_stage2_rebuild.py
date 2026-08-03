@@ -47,14 +47,17 @@ from examples.stage2_rebuild.policy.attach_policy import (
     render_policies,
     support_agent_principal,
 )
+from examples.stage2_rebuild.policy import demo_principals
 from examples.stage2_rebuild import strands_agent
 from examples.stage2_rebuild.strands_agent import build_agent
 from tests import fake_cedar
 from tests.fake_cedar import Entity
 from tests.fake_control_plane import (
+    ClientError as FakeClientError,
     FakeAgentCoreControlClient,
     FakeBoto3,
     FakeClock,
+    FakeIAMClient,
     FakeSTSClient,
     ValidationException,
 )
@@ -603,6 +606,228 @@ class PolicyDeletionTest(unittest.TestCase):
             delete_policy_engine(self.engine_id, "us-east-1", timeout=30)
 
 
+class DemoPrincipalsTest(unittest.TestCase):
+    """The two roles the Cedar proof rests on, and what makes the proof sound."""
+
+    def setUp(self):
+        quiet(self)
+        self.iam = FakeIAMClient()
+        self.sts = FakeSTSClient()
+        patch_boto3(self, demo_principals, iam=self.iam, sts=self.sts)
+        self.clock = patch_clock(self, demo_principals)
+
+    def create(self):
+        return demo_principals.create_demo_roles(GATEWAY_ARN, "us-east-1")
+
+    def test_both_roles_get_the_same_permissions(self):
+        self.create()
+        documents = demo_principals.assert_identical_iam("us-east-1")
+        self.assertEqual(*documents)
+        # And the permission is the gateway, not the tools: scoping tools in IAM
+        # would give a denial two possible explanations.
+        statement = documents[0]["Statement"][0]
+        self.assertEqual(statement["Resource"], GATEWAY_ARN)
+        self.assertEqual(statement["Action"], "bedrock-agentcore:*")
+
+    def test_a_difference_between_the_two_roles_is_refused(self):
+        # The whole proof is that IAM cannot explain the denial. If the two roles
+        # drift, the four calls that follow mean nothing, so this has to raise
+        # rather than warn.
+        self.create()
+        self.iam.inline[demo_principals.SUPPORT_ROLE_NAME][
+            demo_principals.POLICY_NAME
+        ]["Statement"][0]["Action"] = "bedrock-agentcore:InvokeGateway"
+
+        with self.assertRaises(RuntimeError) as caught:
+            demo_principals.assert_identical_iam("us-east-1")
+        self.assertIn("identical", str(caught.exception))
+
+    def test_a_managed_policy_on_one_role_is_refused(self):
+        # Comparing inline documents alone would miss it: a managed policy is a
+        # permission difference the inline comparison cannot see.
+        self.create()
+        self.iam.attached[demo_principals.READ_ONLY_ROLE_NAME] = [
+            {"PolicyName": "PowerUserAccess", "PolicyArn": "arn:aws:iam::aws:policy/x"}
+        ]
+
+        with self.assertRaises(RuntimeError) as caught:
+            demo_principals.assert_identical_iam("us-east-1")
+        self.assertIn("managed policies", str(caught.exception))
+
+    def test_the_cedar_principal_is_the_assumed_role_form(self):
+        # The single highest-consequence conversion in stage 2. IAM returns
+        # arn:aws:iam::...:role/Name; an AWS_IAM gateway presents
+        # arn:aws:sts::...:assumed-role/Name. A rule written with the IAM form
+        # matches nobody, and default-deny makes that look like enforcement
+        # working rather than a typo.
+        principal = demo_principals.cedar_principal(
+            f"arn:aws:iam::123456789012:role/{demo_principals.READ_ONLY_ROLE_NAME}"
+        )
+        self.assertEqual(
+            principal,
+            "arn:aws:sts::123456789012:assumed-role/MigratedAgentReadOnlyCaller",
+        )
+        self.assertNotIn(":iam:", principal)
+
+    def test_creating_twice_is_not_an_error(self):
+        self.create()
+        arns = self.create()
+        self.assertEqual(len(arns), 2)
+        demo_principals.assert_identical_iam("us-east-1")
+
+    def test_assume_retries_the_access_denied_a_new_role_returns(self):
+        self.create()
+        self.sts.access_denied_times = 3
+        credentials = demo_principals.assume(
+            self.iam.roles[demo_principals.SUPPORT_ROLE_NAME]["Arn"],
+            "proof-1",
+            "us-east-1",
+        )
+        self.assertIn("AccessKeyId", credentials)
+        self.assertTrue(self.clock.slept)
+
+    def test_assume_gives_up_rather_than_retrying_forever(self):
+        self.create()
+        self.sts.access_denied_times = 10_000
+        with self.assertRaises(FakeClientError):
+            demo_principals.assume("arn:aws:iam::1:role/x", "proof-1", "us-east-1", 30)
+
+    def test_the_inline_policy_goes_before_the_role_it_is_on(self):
+        # IAM refuses to delete a role that still has a policy attached, so the
+        # order here is the service's and not a preference.
+        self.create()
+        demo_principals.delete_demo_roles("us-east-1")
+
+        self.assertEqual(self.iam.roles, {})
+        deletes = [name for name, _ in self.iam.calls if name.startswith("delete_")]
+        self.assertEqual(
+            deletes,
+            ["delete_role_policy", "delete_role", "delete_role_policy", "delete_role"],
+        )
+
+    def test_a_role_that_will_not_delete_does_not_strand_the_other(self):
+        self.create()
+        first = demo_principals.READ_ONLY_ROLE_NAME
+        self.iam.inline[first]["Stuck"] = {"Version": "2012-10-17"}
+
+        def refuse(**kwargs):
+            if kwargs["PolicyName"] == "Stuck":
+                raise FakeClientError("DeleteConflict", "policy is not deletable")
+            return None
+
+        original = self.iam.delete_role_policy
+        self.iam.delete_role_policy = lambda **kwargs: refuse(**kwargs) or original(
+            **kwargs
+        )
+
+        with self.assertRaises(FakeClientError):
+            demo_principals.delete_demo_roles("us-east-1")
+
+        self.assertIn(first, self.iam.roles)
+        self.assertNotIn(demo_principals.SUPPORT_ROLE_NAME, self.iam.roles)
+
+    def test_deleting_roles_that_are_already_gone_is_not_an_error(self):
+        self.create()
+        demo_principals.delete_demo_roles("us-east-1")
+        demo_principals.delete_demo_roles("us-east-1")  # must not raise
+
+
+class PolicyEnforcementProofTest(unittest.TestCase):
+    """Two callers times two tools: the check that a denial is Cedar's."""
+
+    ROLE_ARNS = {
+        run_walkthrough.READ_ONLY_ROLE_NAME: (
+            "arn:aws:iam::123456789012:role/MigratedAgentReadOnlyCaller"
+        ),
+        run_walkthrough.SUPPORT_ROLE_NAME: (
+            "arn:aws:iam::123456789012:role/MigratedAgentSupportAgent"
+        ),
+    }
+    DENIAL = (
+        "Tool execution failed: Tool Execution Denied: Tool call not allowed due to "
+        "policy enforcement [No policy applies to the request (denied by default).]"
+    )
+
+    def setUp(self):
+        self.output = io.StringIO()
+        captured = contextlib.redirect_stdout(self.output)
+        captured.__enter__()
+        self.addCleanup(captured.__exit__, None, None, None)
+        self.calls = []
+        self.decisions = dict(run_walkthrough.EXPECTED_DECISIONS)
+        self.replace(run_walkthrough, "assume", self._assume)
+        self.replace(run_walkthrough, "call_tool_through_gateway", self._call)
+
+    def replace(self, module, name, value):
+        self.addCleanup(setattr, module, name, getattr(module, name))
+        setattr(module, name, value)
+
+    def _assume(self, role_arn, session_name, region_name, *args):
+        return {"AccessKeyId": f"ASIA-{role_arn.split('/')[-1]}"}
+
+    def _call(self, gateway_url, tool_name, arguments, region_name, credentials=None):
+        # The caller is recovered from the credentials rather than passed in, so a
+        # proof that signed both rows with the same identity fails here.
+        role = credentials["AccessKeyId"].removeprefix("ASIA-")
+        self.calls.append((role, tool_name))
+        allowed = self.decisions[(role, tool_name)]
+        return allowed, '{"order_id": "12345"}' if allowed else self.DENIAL
+
+    def prove(self):
+        return run_walkthrough.prove_policy_enforcement(
+            "https://gateway.example/mcp", self.ROLE_ARNS, "us-east-1"
+        )
+
+    def test_both_tools_are_called_as_both_principals(self):
+        self.prove()
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(set(self.calls), set(run_walkthrough.EXPECTED_DECISIONS))
+
+    def test_each_row_is_signed_as_its_own_role(self):
+        # The defect this exists for: signing every call with the ambient
+        # credentials makes all four decisions identical and the matrix a
+        # tautology.
+        self.prove()
+        for role_name in self.ROLE_ARNS:
+            self.assertEqual(
+                sum(1 for role, _ in self.calls if role == role_name), 2
+            )
+
+    def test_the_expected_matrix_passes_and_says_so(self):
+        self.prove()
+        printed = self.output.getvalue()
+        self.assertIn("All four decisions match", printed)
+        self.assertIn("Cedar", printed)
+
+    def test_a_permitted_call_that_is_denied_fails_the_run(self):
+        self.decisions[
+            (run_walkthrough.READ_ONLY_ROLE_NAME, "supportTools___lookup_order")
+        ] = False
+
+        with self.assertRaises(RuntimeError) as caught:
+            self.prove()
+        self.assertIn("support_tools.cedar", str(caught.exception))
+        self.assertIn("True -> False", str(caught.exception))
+
+    def test_a_denied_call_that_is_permitted_fails_the_run(self):
+        # The failure that matters most: enforcement silently off. Cedar in
+        # LOG_ONLY mode, or an engine that never attached, allows all four calls
+        # and every one of them looks like a success.
+        self.decisions[
+            (run_walkthrough.READ_ONLY_ROLE_NAME, "supportTools___process_return")
+        ] = True
+
+        with self.assertRaises(RuntimeError) as caught:
+            self.prove()
+        self.assertIn("False -> True", str(caught.exception))
+
+    def test_the_denial_is_printed_whole(self):
+        # The reason sits at the end of the message, so a fixed-width truncation
+        # leaves a reader looking at a refusal with no explanation attached.
+        self.prove()
+        self.assertIn(self.DENIAL, self.output.getvalue())
+
+
 class TeardownTest(unittest.TestCase):
     """The walkthrough's teardown: correct order, and nothing skipped."""
 
@@ -619,6 +844,9 @@ class TeardownTest(unittest.TestCase):
         self.replace(run_walkthrough, "delete_policies", self._recorder("policies"))
         self.replace(
             run_walkthrough, "delete_policy_engine", self._recorder("policy engine")
+        )
+        self.replace(
+            run_walkthrough, "delete_demo_roles", self._recorder("demo IAM roles")
         )
         # The target and gateway deletes stay real, because their retry and
         # confirm behaviour is part of what is under test here; they are only
@@ -746,6 +974,42 @@ class TeardownTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as caught:
             self.full_teardown()
         self.assertIn("TimeoutError", str(caught.exception))
+
+    def test_the_two_cedar_principals_are_deleted_last(self):
+        # Two IAM roles are not billable and are still not free to leave behind:
+        # a role that can call a gateway is a permission nobody is auditing. Last
+        # because a role that will not delete must not strand a resource that
+        # costs money.
+        self.full_teardown(demo_roles=True)
+
+        self.assertEqual(
+            self.attempted,
+            [
+                "target",
+                "gateway",
+                "memory",
+                "policies",
+                "policy engine",
+                "demo IAM roles",
+            ],
+        )
+
+    def test_roles_are_attempted_even_when_everything_before_them_failed(self):
+        self.control.validation_failures = 10_000
+        self.replace(
+            run_walkthrough,
+            "delete_policies",
+            self._recorder("policies", error=ValidationException("still referenced")),
+        )
+
+        with self.assertRaises(RuntimeError):
+            self.full_teardown(demo_roles=True)
+
+        self.assertIn("demo IAM roles", self.attempted)
+
+    def test_a_run_that_created_no_roles_does_not_touch_iam(self):
+        self.full_teardown()
+        self.assertNotIn("demo IAM roles", self.attempted)
 
 
 def quiet(test):

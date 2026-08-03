@@ -47,11 +47,12 @@ GATEWAY_ARN_PLACEHOLDER = "<GATEWAY_ARN>"
 READ_ONLY_PLACEHOLDER = "<READ_ONLY_PRINCIPAL_ARN>"
 SUPPORT_AGENT_PLACEHOLDER = "<SUPPORT_AGENT_PRINCIPAL_ARN>"
 
-# The privileged identity in the shipped rules. The walkthrough runs as the
-# read-only caller and deliberately does not hold this role: that is what makes
-# its process_return call a policy decision rather than a permission it happens
-# to have. Cedar does not require the principal to exist — measured — so nothing
-# creates it.
+# The privileged identity this module defaults to when invoked as a script with
+# no --support-agent-principal. Cedar does not require the principal to exist —
+# measured — so nothing creates it, which makes it a usable default and a poor
+# demonstration: a permit for a role nobody holds cannot be shown being used.
+# run_walkthrough passes two real roles instead; see
+# examples/stage2_rebuild/policy/demo_principals.py.
 SUPPORT_AGENT_ROLE_NAME = "SupportEscalationRole"
 
 # One AgentCore policy per marked block in the .cedar file.
@@ -283,6 +284,7 @@ def call_tool_through_gateway(
     tool_name: str,
     arguments: dict,
     region_name: str = "us-east-1",
+    credentials=None,
 ) -> Tuple[bool, str]:
     """Call one tool through the gateway and report (allowed, text).
 
@@ -292,8 +294,11 @@ def call_tool_through_gateway(
     treated as a deny — an error result on the MCP response, and an exception
     raised by the client — because which one the gateway uses is a property of
     the service rather than of this code.
+
+    credentials names the principal the request is signed as, and so the
+    principal Cedar evaluates. Omit it to call as the current caller.
     """
-    client = build_mcp_client(gateway_url, region_name)
+    client = build_mcp_client(gateway_url, region_name, credentials)
     client.start()
     try:
         result = client.call_tool_sync(

@@ -56,9 +56,23 @@ class SigV4HTTPXAuth(httpx.Auth):
         yield request
 
 
-def build_mcp_client(gateway_url: str, region_name: str = "us-east-1") -> MCPClient:
-    """Build an MCPClient that signs requests to an AWS_IAM gateway with SigV4."""
-    credentials = boto3.Session().get_credentials()
+def build_mcp_client(
+    gateway_url: str,
+    region_name: str = "us-east-1",
+    credentials=None,
+) -> MCPClient:
+    """Build an MCPClient that signs requests to an AWS_IAM gateway with SigV4.
+
+    credentials defaults to the ambient ones, which is what an agent running in
+    Runtime or on a laptop wants. Pass them explicitly to call the gateway as a
+    different principal — assumed-role credentials from sts.assume_role, for
+    instance. Since the gateway authorizes on the signing identity, which
+    principal signs is the whole input to a policy decision, and taking it from
+    the process environment alone means it can only be changed by launching
+    another process.
+    """
+    if credentials is None:
+        credentials = boto3.Session().get_credentials()
     auth = SigV4HTTPXAuth(credentials, SERVICE, region_name)
     return MCPClient(lambda: streamablehttp_client(gateway_url, auth=auth))
 

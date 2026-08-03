@@ -30,18 +30,19 @@ its hand-written router are gone, replaced by a model-driven loop over the same
 Gateway tools and the same memory resource, and one security feature is layered
 on: Cedar rules in Policy in AgentCore on the tool calls.
 
-    build the Strands agent
-        -> register Cedar rules and attach them to the gateway in ENFORCE mode
-        -> invoke, then call one permitted and one denied tool
+    create two IAM roles that differ in nothing IAM can see
+        -> register Cedar rules naming both and attach them in ENFORCE mode
+        -> build the Strands agent, signing as the read-only role, and invoke it
+        -> call both tools as both roles and check all four decisions
 
 Stage 2 reuses the gateway, target and memory stage 1 creates, so it needs the
 same two ARNs. It has its own entry point at
 examples/stage2_rebuild/strands_agent.py for deploying it to Runtime.
 
 Pass --teardown to delete what ran: the gateway target, the gateway, the memory,
-then the Cedar policies and their engine. Every step is attempted even if an
-earlier one failed, because a delete that skips the rest of the list is how
-resources get orphaned. The Lambda and the two IAM roles come from
+the Cedar policies, their engine and the two demo roles. Every step is attempted
+even if an earlier one failed, because a delete that skips the rest of the list is
+how resources get orphaned. The Lambda and the two roles it needs come from
 examples/gateway/lambda_target/deploy.sh and are not deleted here.
 
 --teardown with no --stage is the recovery path, and it is the one to reach for
@@ -50,9 +51,9 @@ when a run has already died:
     python -m examples.run_walkthrough --teardown --dry-run
     python -m examples.run_walkthrough --teardown
 
-It finds the gateway, target, memory, policy engine and policies by the names
-this walkthrough gives them and deletes those, so it works from a different
-process than the one that created them. It needs neither ARN.
+It finds the gateway, target, memory, policy engine, policies and demo roles by
+the names this walkthrough gives them and deletes those, so it works from a
+different process than the one that created them. It needs neither ARN.
 """
 
 import argparse
@@ -82,12 +83,19 @@ from examples.stage1_replatform.agentcore_memory_saver import AgentCoreMemorySav
 from examples.stage1_replatform.langchain_mcp_tools import merge_tools, to_langchain_tools
 from examples.stage2_rebuild.policy.attach_policy import (
     POLICY_ENGINE_NAME,
-    caller_principal,
     call_tool_through_gateway,
     delete_policies,
     delete_policy_engine,
     register,
-    support_agent_principal,
+)
+from examples.stage2_rebuild.policy.demo_principals import (
+    READ_ONLY_ROLE_NAME,
+    SUPPORT_ROLE_NAME,
+    assert_identical_iam,
+    assume,
+    cedar_principal,
+    create_demo_roles,
+    delete_demo_roles,
 )
 from examples.stage2_rebuild.strands_agent import build_agent
 from examples.tools.gateway_mcp_tools import build_mcp_client
@@ -190,13 +198,15 @@ def teardown(
     region_name: str,
     policy_engine_id: str = "",
     policy_ids: Sequence[str] = (),
+    demo_roles: bool = False,
 ) -> None:
     """Delete everything the walkthrough created, in dependency order.
 
-    Target, then gateway, then memory, then the Cedar policies and last their
-    engine. The first two are ordered by the service — a gateway with a target
-    attached will not delete — and the engine goes after the gateway that
-    referenced it.
+    Target, then gateway, then memory, then the Cedar policies, their engine, and
+    last the two demo IAM roles. The first two are ordered by the service — a
+    gateway with a target attached will not delete — and the engine goes after the
+    gateway that referenced it. IAM has no such ordering; the roles go last only
+    so that a failure to delete a role cannot leave a billable resource behind it.
 
     Every step is attempted even when an earlier one raises, and the failures are
     collected and re-raised together at the end. A teardown that stops at its first
@@ -225,6 +235,8 @@ def teardown(
                 lambda: delete_policy_engine(policy_engine_id, region_name),
             )
         )
+    if demo_roles:
+        steps.append(("demo IAM roles", lambda: delete_demo_roles(region_name)))
 
     failures = []
     for label, delete in steps:
@@ -395,7 +407,7 @@ def _ask_strands(agent, prompt: str) -> str:
     return text
 
 
-def _report_decision(tool_name: str, allowed: bool, text: str) -> None:
+def _report_decision(caller: str, tool_name: str, allowed: bool, text: str) -> None:
     """Print one gateway policy decision.
 
     A permitted call returns the tool's own payload, which is a JSON blob the
@@ -404,10 +416,87 @@ def _report_decision(tool_name: str, allowed: bool, text: str) -> None:
     Truncating a denial at a fixed width drops the reason and leaves a reader
     looking at a refusal with no explanation attached.
     """
-    if allowed:
-        print(f"\n{tool_name}({DEMO_ORDER_ID}) allowed=True: {text[:120]}")
-    else:
-        print(f"\n{tool_name}({DEMO_ORDER_ID}) allowed=False: {text}")
+    print(f"\n{caller} -> {tool_name}({DEMO_ORDER_ID}) allowed={allowed}")
+    print(f"  {text[:120] if allowed else text}")
+
+
+# What the Cedar rules in support_tools.cedar say, expressed as the four calls
+# that test them: (caller, tool) -> expected decision. Written out rather than
+# derived from the rules, because a table derived from the thing it is checking
+# agrees with it by construction.
+EXPECTED_DECISIONS = {
+    (READ_ONLY_ROLE_NAME, "supportTools___lookup_order"): True,
+    (READ_ONLY_ROLE_NAME, "supportTools___process_return"): False,
+    (SUPPORT_ROLE_NAME, "supportTools___lookup_order"): True,
+    (SUPPORT_ROLE_NAME, "supportTools___process_return"): True,
+}
+
+_PROOF_CALLS = (
+    ("supportTools___lookup_order", {"order_id": DEMO_ORDER_ID}),
+    (
+        "supportTools___process_return",
+        {"order_id": DEMO_ORDER_ID, "reason": "damaged in transit"},
+    ),
+)
+
+
+def prove_policy_enforcement(
+    gateway_url: str, role_arns: dict, region_name: str
+) -> dict:
+    """Call both tools as both principals and check all four decisions.
+
+    Two callers times two tools is the smallest experiment that attributes a
+    refusal to Cedar. One caller refused one tool proves nothing on its own: the
+    ordinary explanation for a failed call is a missing IAM permission, and a
+    single denial cannot tell that apart from an authorization decision. Holding
+    IAM identical across the two rows and the tool identical down the two columns
+    leaves the Cedar rules as the only thing that differs between an allow and a
+    deny.
+
+    Raises if any of the four decisions is not the one the rules describe. A
+    walkthrough that prints "denied" where it should print "allowed" and still
+    exits 0 teaches the reader that the feature works when what they just watched
+    was it failing.
+    """
+    print("\n=== policy enforcement, two principals x two tools ===")
+    decisions = {}
+    for role_name, role_arn in role_arns.items():
+        credentials = assume(role_arn, f"proof-{uuid.uuid4().hex[:8]}", region_name)
+        for tool_name, arguments in _PROOF_CALLS:
+            allowed, text = call_tool_through_gateway(
+                gateway_url, tool_name, arguments, region_name, credentials
+            )
+            decisions[(role_name, tool_name)] = allowed
+            _report_decision(role_name, tool_name, allowed, text)
+
+    print("\n  caller                          lookup_order  process_return")
+    for role_name in (READ_ONLY_ROLE_NAME, SUPPORT_ROLE_NAME):
+        row = [
+            decisions.get((role_name, tool_name)) for tool_name, _ in _PROOF_CALLS
+        ]
+        print(
+            f"  {role_name:<30}  {str(row[0]):<12}  {row[1]}"
+        )
+
+    wrong = {
+        key: (expected, decisions.get(key))
+        for key, expected in EXPECTED_DECISIONS.items()
+        if decisions.get(key) is not expected
+    }
+    if wrong:
+        raise RuntimeError(
+            "Policy enforcement did not match support_tools.cedar. "
+            "(caller, tool): expected -> observed: "
+            + "; ".join(
+                f"{key}: {expected} -> {observed}"
+                for key, (expected, observed) in wrong.items()
+            )
+        )
+    print(
+        "\nAll four decisions match support_tools.cedar, and IAM is identical on "
+        "both callers, so the one refusal is Cedar's."
+    )
+    return decisions
 
 
 def run_stage2(
@@ -429,17 +518,33 @@ def run_stage2(
     """
     print("\n=== stage 2: Strands rebuild + Policy ===")
 
-    read_only = caller_principal(region_name)
-    privileged = support_agent_principal(region_name)
+    # Both Cedar principals are real roles this walkthrough creates, and neither
+    # is the identity running it. That is what makes the denial legible: the two
+    # roles are identical to IAM, so the only difference between the caller that
+    # may start a return and the caller that may not is a Cedar rule.
+    role_arns = create_demo_roles(gateway_arn, region_name)
+    created["demo_roles"] = True
+    assert_identical_iam(region_name)
+
+    read_only = cedar_principal(role_arns[READ_ONLY_ROLE_NAME])
+    privileged = cedar_principal(role_arns[SUPPORT_ROLE_NAME])
     print(f"policy read-only principal: {read_only}")
-    print(f"policy support-agent principal: {privileged} (not held by this caller)")
+    print(f"policy support-agent principal: {privileged}")
     engine_id, policies = register(
         gateway_id, gateway_arn, read_only, privileged, "ENFORCE", region_name
     )
     created["policy_engine_id"] = engine_id
     created["policy_ids"] = list(policies.values())
 
-    mcp_client = build_mcp_client(gateway_url, region_name)
+    # The agent signs its gateway calls as the read-only role, so it holds exactly
+    # the tools the rules give that principal: it can look an order up and cannot
+    # start a return. Its model calls still go out as the ambient identity, which
+    # is the split Runtime would give it too — an execution role for the gateway,
+    # separate from whatever the container is allowed to invoke.
+    read_only_credentials = assume(
+        role_arns[READ_ONLY_ROLE_NAME], f"agent-{uuid.uuid4().hex[:8]}", region_name
+    )
+    mcp_client = build_mcp_client(gateway_url, region_name, read_only_credentials)
     mcp_client.start()
     try:
         agent = build_agent(
@@ -456,23 +561,9 @@ def run_stage2(
     finally:
         mcp_client.stop(None, None, None)
 
-    # Cedar decides at the gateway, so the way to read the decision is to make the
-    # call. Same caller, same order, two different tools: the read is permitted and
-    # the write is not, because only the support-agent role is permitted the write.
-    allowed, text = call_tool_through_gateway(
-        gateway_url,
-        "supportTools___lookup_order",
-        {"order_id": DEMO_ORDER_ID},
-        region_name,
-    )
-    _report_decision("lookup_order", allowed, text)
-    allowed, text = call_tool_through_gateway(
-        gateway_url,
-        "supportTools___process_return",
-        {"order_id": DEMO_ORDER_ID, "reason": "damaged in transit"},
-        region_name,
-    )
-    _report_decision("process_return", allowed, text)
+    # Cedar decides at the gateway and there is no synchronous API to ask, so the
+    # way to read a decision is to make the call.
+    prove_policy_enforcement(gateway_url, role_arns, region_name)
 
 
 def discover_resources(
@@ -525,6 +616,18 @@ def discover_resources(
                         policy["policyId"] for policy in policies.get("policies", [])
                     ]
                 found["policy_ids"] = policy_ids
+
+    # The two Cedar principals are IAM roles, so they are not free of consequence
+    # if left behind: a role that can call a deleted gateway is a permission
+    # nobody is auditing. Recovery has to find them too, or the flag that claims
+    # to return the account to baseline leaves two roles in it.
+    iam = boto3.client("iam", region_name=region_name)
+    for role_name in (READ_ONLY_ROLE_NAME, SUPPORT_ROLE_NAME):
+        try:
+            iam.get_role(RoleName=role_name)
+            found["demo_roles"] = True
+        except iam.exceptions.NoSuchEntityException:
+            pass
     return found
 
 
@@ -543,6 +646,9 @@ def _print_ledger(found: dict) -> bool:
             anything = True
     for policy_id in found.get("policy_ids", ()):
         print(f"  policy: {policy_id}")
+        anything = True
+    if found.get("demo_roles"):
+        print(f"  IAM roles: {READ_ONLY_ROLE_NAME}, {SUPPORT_ROLE_NAME}")
         anything = True
     if not anything:
         print("  nothing found")
@@ -625,9 +731,13 @@ def run(args: argparse.Namespace) -> None:
                 ),
                 " B",
             )
-        if measured is not None:
-            measured.report()
     finally:
+        # Reported from the finally rather than after the stages, so that a run
+        # that fails part way through still prints what it measured before it
+        # broke. The failure is the interesting part of such a run and the
+        # numbers taken up to it are what say where it got to.
+        if measured is not None and measured.taken:
+            measured.report()
         if args.teardown:
             teardown(
                 created.get("gateway_id", ""),
@@ -636,6 +746,7 @@ def run(args: argparse.Namespace) -> None:
                 region,
                 policy_engine_id=created.get("policy_engine_id", ""),
                 policy_ids=created.get("policy_ids", ()),
+                demo_roles=created.get("demo_roles", False),
             )
 
 
@@ -656,6 +767,7 @@ def run_teardown_only(args: argparse.Namespace) -> None:
         args.region,
         policy_engine_id=found.get("policy_engine_id", ""),
         policy_ids=found.get("policy_ids", ()),
+        demo_roles=found.get("demo_roles", False),
     )
 
 
