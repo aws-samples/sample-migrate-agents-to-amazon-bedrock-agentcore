@@ -1,6 +1,6 @@
 # Migrating Agentic Workloads to Amazon Bedrock AgentCore
 
-This repository contains sample code for the AWS blog post [Migrating agentic workloads to Amazon Bedrock AgentCore from other platforms](https://aws.amazon.com/blogs/machine-learning/). It demonstrates how to migrate an existing LangGraph agent to [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
+This repository contains sample code for the AWS blog post "Migrating agentic workloads to Amazon Bedrock AgentCore from other platforms" — **not yet published; there is no link to give yet, and `TODO: post URL` is what goes here until there is.** It demonstrates how to migrate an existing LangGraph agent to [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
 
 > **Important:** This sample code is for demonstration and educational purposes only. Review and adapt security configurations, error handling, and resource sizing for your production environment.
 
@@ -34,7 +34,7 @@ from the files on disk rather than asserting it, so the post's numbers can be re
 ```
 Dockerfile                          # Optional ARM64 image; the zip deploy is the path used here
 requirements.txt                    # Six entries; langchain-aws is pinned, the rest are floors
-setup.sh                            # Create .venv, install requirements, check credentials
+setup.sh                            # Create .venv, install requirements, warn on missing credentials
 examples/
 ├── run_walkthrough.py              # Run the stages in order (create -> invoke -> teardown)
 ├── stage0_langgraph/
@@ -81,9 +81,16 @@ tests/                              # Offline suite; fakes for Bedrock, MCP, Mem
 
 ## Prerequisites
 
-- An [AWS account](https://aws.amazon.com/free/) with [Amazon Bedrock](https://aws.amazon.com/bedrock/) model access enabled
-- Python 3.10 or later
-- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) installed and configured
+Not all of these are needed at once, and the order below is the order they start to matter:
+
+- Python 3.10 or later, and a clone. That is the whole of what steps 1 to 3 need — the test suite runs
+  offline, with no AWS account.
+- An [AWS account](https://aws.amazon.com/free/) with [Amazon Bedrock](https://aws.amazon.com/bedrock/)
+  model access enabled, and credentials. Needed from step 4 onwards, which is the first step that calls
+  AWS.
+- The [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), needed
+  by one script only: `examples/gateway/lambda_target/deploy.sh`. Everything else uses boto3 from the
+  virtual environment.
 
 ## Getting started
 
@@ -95,7 +102,8 @@ cd sample-migrate-agents-to-amazon-bedrock-agentcore
 ```
 
 2. Run the setup script. It creates a virtual environment, installs dependencies, and warns — rather
-   than fails — if the AWS CLI or credentials are missing, because steps 3 and 4 need neither:
+   than fails — if the AWS CLI or credentials are missing, because step 3 needs neither and step 4
+   needs credentials but not the CLI:
 
 ```bash
 ./setup.sh
@@ -174,9 +182,17 @@ order and passes each stage's result to the next:
    tools (signed with SigV4 by `examples/tools/gateway_mcp_tools.py`, converted
    to LangChain tools by `examples/stage1_replatform/langchain_mcp_tools.py`) and
    the AgentCore Memory checkpointer keyed on the memory id.
-5. **Rebuild and authorize it** (`examples/stage2_rebuild/`) — builds the Strands
-   agent on those same three resources, then registers the Cedar rules and
-   attaches them to the gateway in `ENFORCE` mode.
+5. **Deploy that same agent to Runtime**
+   (`examples/stage1_replatform/deploy_runtime.py`) — packages
+   `agent_runtime.py` as a zip, uploads it to Amazon S3, creates the runtime, and
+   invokes it twice on one session id, cold then warm. The gateway URL from step 1
+   and the memory id from step 3 reach it as Runtime environment variables, which
+   is why the agent itself is deployed unmodified. This is where stage 1 ends;
+   [Deploying to Runtime](#deploying-to-runtime) is what the artifact is and what
+   the packaging costs to get wrong.
+6. **Rebuild and authorize it** (`examples/stage2_rebuild/`) — builds the Strands
+   agent on the gateway, target and memory from steps 1 to 3, then registers the
+   Cedar rules and attaches them to the gateway in `ENFORCE` mode.
 
 Run every stage in order, with a teardown at the end:
 
@@ -189,7 +205,13 @@ python -m examples.run_walkthrough \
 
 `--stage` selects one stage instead of all of them. `--stage 0` is the
 self-hosted starting point and creates nothing, so it needs neither ARN;
-`--stage 1` creates the gateway, target and memory above; `--stage 2` rebuilds
+`--stage 1` creates the gateway, target and memory above **and four more resources,
+because the Runtime deploy is part of it**: an AgentCore Runtime
+(`MigratedAgentRuntime`), the S3 bucket holding its zip
+(`migrated-agent-runtime-<account-id>`), its IAM execution role
+(`MigratedAgentRuntimeRole`), and a CloudWatch log group that nothing asked for —
+the service creates it on the runtime's first log line. `--teardown` deletes all
+four. `--stage 2` rebuilds
 the agent on Strands and hardens it, reusing stage 1's three resources and so
 needing the same two ARNs. Stage 2 creates a Cedar policy engine of its own, and
 `--teardown` deletes it. The rebuilt agent also has its own Runtime entry point at
@@ -243,15 +265,22 @@ repeating the service's message.
 
 If you created AWS resources while following the examples, delete them to avoid ongoing charges.
 
-Passing `--teardown` to `examples/run_walkthrough.py` deletes what the walkthrough created, in the required order: the gateway target first, then the gateway once target deletion has finished, then the memory resource, and last the Cedar policies and the policy engine holding them. Deleting a gateway that still has a target attached returns `ValidationException`, and it does so for a while after `ListGatewayTargets` already returns nothing, so the delete is retried and completion is confirmed with `GetGateway`. Every step is attempted even when an earlier one fails, and the failures are reported together at the end, because a teardown that stops at its first error orphans everything later in the list.
+Passing `--teardown` to `examples/run_walkthrough.py` deletes what the walkthrough created, in the order the dependencies require: the agent runtime first, then the gateway target, then the gateway once target deletion has finished, then the memory resource, then the Cedar policies and the policy engine holding them, then the two demo IAM roles stage 2 creates, and last the three things the runtime leaves behind — its artifact bucket, its execution role and its log group. Deleting a gateway that still has a target attached returns `ValidationException`, and it does so for a while after `ListGatewayTargets` already returns nothing, so the delete is retried and completion is confirmed with `GetGateway`. The runtime goes first and the bucket and role go last because the runtime holds a reference to the zip and assumes the role; the log group is last of all, because deleting it while the runtime is still alive only means its next log line recreates it. Every step is attempted even when an earlier one fails, and the failures are reported together at the end, because a teardown that stops at its first error orphans everything later in the list.
 
-To remove resources by hand:
+`--teardown` on its own, with no `--stage`, is the recovery path for a run that already died: it finds all of the above in the account by the names this walkthrough gives them, so it works from a different process than the one that created them, and `--dry-run` lists what it would delete without deleting it.
 
-1. Delete the gateway target, then the gateway, in that order.
-2. Delete the AgentCore Memory resource.
-3. Delete the Cedar policies, then the policy engine that holds them.
+To remove resources by hand — the names are the ones the scripts use, so they are what to search for:
+
+1. Delete the gateway target, then the gateway (`MigratedAgentGateway`), in that order.
+2. Delete the AgentCore Memory resource (`MigratedAgentMemory-` plus a service-assigned suffix).
+3. Delete the Cedar policies, then the policy engine that holds them (`SupportToolsPolicyEngine`).
 4. Delete the Lambda function and the two IAM roles created by `examples/gateway/lambda_target/deploy.sh`, which are the Lambda execution role and the gateway execution role.
-5. Remove any AgentCore Runtime deployment from the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/).
+5. If you ran stage 2, delete its two demo IAM roles, `MigratedAgentReadOnlyCaller` and `MigratedAgentSupportAgent`. They are Cedar principals, not callers you use, and a role that can reach a deleted gateway is a permission nobody is auditing.
+6. Delete the four resources the Runtime deploy leaves, none of which the AgentCore console will clear for you:
+   - the agent runtime `MigratedAgentRuntime`, in the [Amazon Bedrock AgentCore console](https://console.aws.amazon.com/bedrock/) or with `DeleteAgentRuntime`;
+   - the S3 bucket `migrated-agent-runtime-<account-id>`, which holds `agent.zip` and has to be emptied before it will delete;
+   - the IAM role `MigratedAgentRuntimeRole`, whose inline `RuntimeExecution` policy has to go first;
+   - the CloudWatch log group `/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT`, which `DeleteAgentRuntime` does not remove. Copy the runtime id before deleting the runtime: afterwards the id is no longer discoverable and the group is the one resource with nothing left pointing at it.
 
 ## Security
 
