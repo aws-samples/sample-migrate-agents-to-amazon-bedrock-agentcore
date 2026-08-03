@@ -10,15 +10,22 @@ publishes "supportTools___lookup_order" and "supportTools___process_return".
 
 credentialProviderConfigurations uses GATEWAY_IAM_ROLE, so the gateway invokes
 the Lambda with its own execution role and no external credentials are needed.
+
+Idempotent, in the same sense as create_gateway.py: a target of this name that
+already exists is updated to the definition below rather than duplicated or left
+alone. Updated rather than reused untouched because the tool schema here is what
+the gateway publishes, so a target left over from an older run would silently
+decide which tools the rest of the walkthrough sees.
 """
 
 import argparse
 import os
+from typing import Optional
 
 import boto3
 
 # Tool definitions published to MCP clients through the gateway. These match the
-# lookup_order / process_return tools in examples/rebuild/strands_agent.py.
+# lookup_order / process_return tools in examples/stage2_rebuild/strands_agent.py.
 TOOL_SCHEMA = [
     {
         "name": "lookup_order",
@@ -55,19 +62,39 @@ TOOL_SCHEMA = [
 ]
 
 
+def _find_existing_target(client, gateway_id: str, name: str) -> Optional[str]:
+    """Return the targetId of an existing target with this name, or None."""
+    paginator = client.get_paginator("list_gateway_targets")
+    for page in paginator.paginate(gatewayIdentifier=gateway_id):
+        for summary in page.get("items", []):
+            if summary.get("name") == name:
+                return summary["targetId"]
+    return None
+
+
+def existing_target_id(
+    gateway_id: str,
+    target_name: str = "supportTools",
+    region_name: str = "us-east-1",
+) -> Optional[str]:
+    """Whether this target is already on the gateway, before register_target runs."""
+    client = boto3.client("bedrock-agentcore-control", region_name=region_name)
+    return _find_existing_target(client, gateway_id, target_name)
+
+
 def register_target(
     gateway_id: str,
     lambda_arn: str,
     target_name: str = "supportTools",
     region_name: str = "us-east-1",
 ) -> str:
-    """Register a Lambda MCP target on the gateway and return its targetId."""
+    """Register (or update) a Lambda MCP target and return its targetId."""
     client = boto3.client("bedrock-agentcore-control", region_name=region_name)
 
-    response = client.create_gateway_target(
-        gatewayIdentifier=gateway_id,
-        name=target_name,
-        targetConfiguration={
+    definition = {
+        "gatewayIdentifier": gateway_id,
+        "name": target_name,
+        "targetConfiguration": {
             "mcp": {
                 "lambda": {
                     "lambdaArn": lambda_arn,
@@ -75,13 +102,21 @@ def register_target(
                 }
             }
         },
-        credentialProviderConfigurations=[
+        "credentialProviderConfigurations": [
             {"credentialProviderType": "GATEWAY_IAM_ROLE"}
         ],
-    )
+    }
+
+    existing_id = _find_existing_target(client, gateway_id, target_name)
+    if existing_id is not None:
+        response = client.update_gateway_target(targetId=existing_id, **definition)
+        verb = "Updated existing target"
+    else:
+        response = client.create_gateway_target(**definition)
+        verb = "Registered target"
 
     target_id = response["targetId"]
-    print(f"Registered target '{target_name}' on gateway {gateway_id}: {target_id}")
+    print(f"{verb} '{target_name}' on gateway {gateway_id}: {target_id}")
     print(
         "Published tools: "
         f"{target_name}___lookup_order, {target_name}___process_return"
