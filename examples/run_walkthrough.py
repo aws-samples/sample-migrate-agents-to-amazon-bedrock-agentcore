@@ -305,6 +305,19 @@ def run_stage1(
             mcp_client.stop(None, None, None)
 
 
+def _agent_text(message: dict) -> str:
+    """Join the text blocks of a Strands message into the reply itself.
+
+    AgentResult.message is the raw Bedrock Converse message: a dict with a role
+    and a list of content blocks, only some of which carry text. str() on it
+    prints the whole dict, metadata and token counts included, which is not the
+    agent's answer and is not what the graph stages print for the same turn.
+    """
+    return "\n".join(
+        block["text"] for block in message.get("content", []) if "text" in block
+    )
+
+
 def _ask_strands(agent, prompt: str) -> str:
     """Invoke the Strands agent once and print what came back.
 
@@ -314,7 +327,7 @@ def _ask_strands(agent, prompt: str) -> str:
     """
     print(f"\ncustomer: {prompt}")
     result = agent(prompt)
-    text = str(result.message)
+    text = _agent_text(result.message)
     print(f"  agent: {text}")
     return text
 
