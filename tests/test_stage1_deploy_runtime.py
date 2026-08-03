@@ -53,11 +53,22 @@ class FakeRuntimeControlClient:
         class ResourceNotFoundException(Exception):
             pass
 
+        class ValidationException(Exception):
+            pass
+
     def __init__(self, existing=None, statuses=("READY",)):
         self.existing = existing or {}
         self.statuses = list(statuses)
         self.calls = []
         self.failure_reason = ""
+        # How many CreateAgentRuntime calls fail on role validation before one
+        # works. The live service does this whenever the role was just created.
+        self.role_not_propagated = 0
+        self.create_error = (
+            "Role validation failed for 'arn:aws:iam::1:role/MigratedAgentRuntimeRole'. "
+            "Please verify that the role exists and its trust policy allows "
+            "assumption by this service"
+        )
         # What the control plane reports about its own timing, which is the fourth
         # measurement's only source. Real datetimes, because the code subtracts
         # them and a float would let a wrong subtraction pass.
@@ -74,6 +85,9 @@ class FakeRuntimeControlClient:
 
     def create_agent_runtime(self, **kwargs):
         self.calls.append(("create_agent_runtime", kwargs))
+        if self.role_not_propagated > 0:
+            self.role_not_propagated -= 1
+            raise self.exceptions.ValidationException(self.create_error)
         rid = f"{kwargs['agentRuntimeName']}-abc1234567"
         self.existing[rid] = {"name": kwargs["agentRuntimeName"]}
         return {
@@ -482,6 +496,55 @@ class DeployTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as caught, redirect_stdout(io.StringIO()):
             deploy_runtime.deploy("https://g", "m-1")
         self.assertIn("Role cannot be assumed", str(caught.exception))
+
+    def test_a_role_that_has_not_propagated_yet_is_retried_not_reported(self):
+        """The first live run's failure. The role is fine; IAM is just not ready.
+
+        Nothing offline could have predicted this — it is a property of IAM's
+        propagation, and the fake only models it because the live service did it
+        first. What the test is worth is the other direction: it stops the retry
+        being dropped later by someone who reads it as belt-and-braces.
+        """
+        self.control.role_not_propagated = 2
+        (runtime_id, _, _), output = self.deploy()
+        creates = [n for n, _ in self.control.calls if n == "create_agent_runtime"]
+        self.assertEqual(len(creates), 3)
+        self.assertTrue(runtime_id.startswith(deploy_runtime.RUNTIME_NAME))
+        self.assertIn("not visible to the service yet", output)
+
+    def test_the_retry_is_announced_once_and_not_per_attempt(self):
+        self.control.role_not_propagated = 4
+        _, output = self.deploy()
+        self.assertEqual(output.count("not visible to the service yet"), 1)
+
+    def test_a_role_that_never_propagates_fails_with_the_trust_principal_named(self):
+        """A genuinely wrong trust policy raises the same error as the race.
+
+        So the timeout message has to cover the case the retry cannot fix, or the
+        reader waits two minutes and is then told to wait longer.
+        """
+        self.control.role_not_propagated = 10_000
+        with self.assertRaises(RuntimeError) as caught, redirect_stdout(io.StringIO()):
+            # timeout=0 rather than a large role_not_propagated: the retry loop is
+            # fast enough offline that any finite count of failures is exhausted
+            # before a real deadline passes, which would test the opposite thing.
+            deploy_runtime._create_when_the_role_is_visible(
+                self.control, {"roleArn": "arn:aws:iam::1:role/x"}, timeout=0
+            )
+        message = str(caught.exception)
+        self.assertIn(deploy_runtime.TRUST_PRINCIPAL, message)
+        self.assertIn(deploy_runtime.ROLE_NAME, message)
+
+    def test_a_validation_error_that_is_not_about_the_role_is_not_retried(self):
+        """A narrow retry. A bad artifact must fail now, not in two minutes."""
+        self.control.create_error = "agentRuntimeArtifact.codeConfiguration is invalid"
+        self.control.role_not_propagated = 1
+        with self.assertRaises(
+            FakeRuntimeControlClient.exceptions.ValidationException
+        ), redirect_stdout(io.StringIO()):
+            deploy_runtime.deploy("https://g", "m-1")
+        creates = [n for n, _ in self.control.calls if n == "create_agent_runtime"]
+        self.assertEqual(len(creates), 1)
 
     def test_it_waits_through_creating(self):
         self.control.statuses = ["CREATING", "CREATING", "READY"]

@@ -53,6 +53,11 @@ import boto3
 RUNTIME_NAME = "MigratedAgentRuntime"
 ROLE_NAME = "MigratedAgentRuntimeRole"
 
+# Who assumes the execution role. Named once because the create-time failure for
+# getting it wrong is indistinguishable from the one for IAM not having propagated
+# yet, so the error message for the race has to be able to quote it.
+TRUST_PRINCIPAL = "bedrock-agentcore.amazonaws.com"
+
 # The module Runtime imports and calls. Nested rather than at the zip root, which
 # is what keeps agent_runtime.py's absolute imports working unchanged.
 ENTRY_POINT = "examples/stage1_replatform/agent_runtime.py"
@@ -236,7 +241,7 @@ def _trust_policy() -> dict:
         "Statement": [
             {
                 "Effect": "Allow",
-                "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
+                "Principal": {"Service": TRUST_PRINCIPAL},
                 "Action": "sts:AssumeRole",
             }
         ],
@@ -449,9 +454,7 @@ def deploy(
             "agentRuntimeArn"
         ]
     else:
-        created = control.create_agent_runtime(
-            agentRuntimeName=RUNTIME_NAME, **common
-        )
+        created = _create_when_the_role_is_visible(control, common)
         runtime_id = created["agentRuntimeId"]
         runtime_arn = created["agentRuntimeArn"]
         print(f"Created runtime {RUNTIME_NAME}: {runtime_id}")
@@ -459,6 +462,46 @@ def deploy(
     elapsed = wait_ready(control, runtime_id)
     print(f"Runtime READY in {elapsed:.1f}s")
     return runtime_id, runtime_arn, elapsed
+
+
+def _create_when_the_role_is_visible(control, common: dict, timeout: int = 120) -> dict:
+    """CreateAgentRuntime, retrying while IAM has not yet propagated the role.
+
+    ensure_role returns as soon as CreateRole does, but the role is not yet visible
+    to other services, and CreateAgentRuntime validates it by trying to assume it.
+    The failure it raises is a ValidationException reading "Role validation failed
+    ... verify that the role exists and its trust policy allows assumption by this
+    service", which describes a broken trust policy and is in fact a race: the same
+    call succeeds a few seconds later against the same unmodified role.
+
+    Retried rather than slept before, because the propagation delay has no
+    documented bound and a sleep long enough to be safe is a delay paid on every
+    re-run, when the role has existed for hours. Only the create is retried: once a
+    runtime exists the role has demonstrably propagated.
+
+    A genuinely wrong trust policy still fails, at the timeout, with the service's
+    own message. This is why the retry is narrow — a bare ValidationException retry
+    would also swallow a malformed artifact for two minutes.
+    """
+    deadline = time.monotonic() + timeout
+    attempts = 0
+    while True:
+        try:
+            return control.create_agent_runtime(agentRuntimeName=RUNTIME_NAME, **common)
+        except control.exceptions.ValidationException as error:
+            attempts += 1
+            if "Role validation failed" not in str(error):
+                raise
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"CreateAgentRuntime still rejected {ROLE_NAME} after {timeout}s "
+                    f"and {attempts} attempts. If the role was just created this is "
+                    "IAM propagation; if not, check that its trust policy names "
+                    f"{TRUST_PRINCIPAL}.\n  {error}"
+                ) from error
+            if attempts == 1:
+                print(f"  role {ROLE_NAME} not visible to the service yet; retrying")
+            time.sleep(5)
 
 
 def _explain_invoke_failure(error: Exception) -> None:
