@@ -297,10 +297,17 @@ def call_tool_through_gateway(
 
     credentials names the principal the request is signed as, and so the
     principal Cedar evaluates. Omit it to call as the current caller.
+
+    The connect is inside the try, not before it. A gateway is free to refuse at
+    the MCP handshake rather than at the tool call, and a start() outside the try
+    turns that refusal into an exception escaping a function whose whole contract
+    is to return a decision — which stops the walkthrough on the call it exists to
+    report on.
     """
-    client = build_mcp_client(gateway_url, region_name, credentials)
-    client.start()
+    client = None
     try:
+        client = build_mcp_client(gateway_url, region_name, credentials)
+        client.start()
         result = client.call_tool_sync(
             tool_use_id=f"policy-{uuid.uuid4()}",
             name=tool_name,
@@ -311,7 +318,13 @@ def call_tool_through_gateway(
     except Exception as error:  # noqa: BLE001 - a refusal must not stop the walkthrough
         return False, f"{type(error).__name__}: {error}"
     finally:
-        client.stop(None, None, None)
+        if client is not None:
+            # A client that never started has nothing to stop, and stopping one
+            # that failed to start raises over the top of the real failure.
+            try:
+                client.stop(None, None, None)
+            except Exception as error:  # noqa: BLE001
+                print(f"  (MCP client did not stop cleanly: {error})")
 
 
 def delete_policies(

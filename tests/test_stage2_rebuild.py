@@ -30,7 +30,9 @@ import unittest
 import unittest.mock
 
 import botocore.session
+import httpx
 import mcp.types as mcp_types
+from botocore.credentials import Credentials
 from botocore.validate import ParamValidator
 from strands.tools.mcp.mcp_agent_tool import MCPAgentTool
 
@@ -50,6 +52,7 @@ from examples.stage2_rebuild.policy.attach_policy import (
 from examples.stage2_rebuild.policy import demo_principals
 from examples.stage2_rebuild import strands_agent
 from examples.stage2_rebuild.strands_agent import build_agent
+from examples.tools import gateway_mcp_tools
 from tests import fake_cedar
 from tests.fake_cedar import Entity
 from tests.fake_control_plane import (
@@ -730,6 +733,210 @@ class DemoPrincipalsTest(unittest.TestCase):
         self.create()
         demo_principals.delete_demo_roles("us-east-1")
         demo_principals.delete_demo_roles("us-east-1")  # must not raise
+
+
+class GatewaySigningTest(unittest.TestCase):
+    """Which identity a gateway request is signed as, since that is the whole input
+    to a policy decision.
+
+    Nothing is mocked below build_mcp_client: the real SigV4Auth signs a real
+    httpx.Request, and the assertions read the headers that would have gone out.
+    Only the MCP transport is replaced, because opening one needs a server.
+    """
+
+    ASSUME_ROLE_RESPONSE = {
+        "AccessKeyId": "ASIAREADONLYEXAMPLE",
+        "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "SessionToken": "FwoGZXIvYXdzEXAMPLETOKEN",
+    }
+    URL = "https://gw-abc123.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+
+    def setUp(self):
+        self.captured = {}
+
+        def fake_transport(gateway_url, auth=None):
+            self.captured["url"] = gateway_url
+            self.captured["auth"] = auth
+
+        def fake_mcp_client(factory):
+            # MCPClient does not call the factory until start(); calling it here
+            # is what lets the auth it was built with be inspected.
+            factory()
+            return "mcp-client"
+
+        for name, value in (
+            ("streamablehttp_client", fake_transport),
+            ("MCPClient", fake_mcp_client),
+        ):
+            self.addCleanup(
+                setattr, gateway_mcp_tools, name, getattr(gateway_mcp_tools, name)
+            )
+            setattr(gateway_mcp_tools, name, value)
+
+    def sign(self, credentials):
+        gateway_mcp_tools.build_mcp_client(self.URL, "us-east-1", credentials)
+        request = httpx.Request(
+            "POST",
+            self.URL,
+            content=b'{"jsonrpc":"2.0","method":"tools/call"}',
+            headers={"Content-Type": "application/json"},
+        )
+        list(self.captured["auth"].auth_flow(request))
+        return request.headers
+
+    def test_an_assume_role_response_dict_signs_as_that_role(self):
+        # Measured live before this was handled: passing the STS response straight
+        # through failed with "'dict' object has no attribute 'token'" from inside
+        # SigV4Auth, four frames below the call that supplied it and after the MCP
+        # client had already opened a connection. The API returns a JSON document
+        # and Session.get_credentials() returns an object; both are the obvious
+        # thing to hand this function.
+        headers = self.sign(self.ASSUME_ROLE_RESPONSE)
+
+        self.assertIn(
+            self.ASSUME_ROLE_RESPONSE["AccessKeyId"], headers["Authorization"]
+        )
+        self.assertEqual(
+            headers["X-Amz-Security-Token"],
+            self.ASSUME_ROLE_RESPONSE["SessionToken"],
+        )
+
+    def test_a_botocore_credentials_object_still_works(self):
+        headers = self.sign(
+            Credentials("AKIAAMBIENTEXAMPLE", "secret", "ambient-token")
+        )
+        self.assertIn("AKIAAMBIENTEXAMPLE", headers["Authorization"])
+        self.assertEqual(headers["X-Amz-Security-Token"], "ambient-token")
+
+    def test_two_principals_produce_two_different_signatures(self):
+        # The check that the proof in prove_policy_enforcement is not a tautology:
+        # if both rows signed identically, all four decisions would agree by
+        # construction and the matrix would prove nothing.
+        first = self.sign(self.ASSUME_ROLE_RESPONSE)["Authorization"]
+        second = self.sign(
+            {**self.ASSUME_ROLE_RESPONSE, "AccessKeyId": "ASIASUPPORTEXAMPLE"}
+        )["Authorization"]
+        self.assertNotEqual(first, second)
+
+    def test_the_signature_covers_the_body(self):
+        # requires_request_body is set so httpx materializes the body before
+        # auth_flow runs. If it did not, SigV4 would hash an empty payload and the
+        # gateway would reject every signature.
+        self.assertTrue(gateway_mcp_tools.SigV4HTTPXAuth.requires_request_body)
+        signed = self.sign(self.ASSUME_ROLE_RESPONSE)["Authorization"]
+        credentials = dict(self.ASSUME_ROLE_RESPONSE)
+        auth = gateway_mcp_tools.SigV4HTTPXAuth(
+            Credentials(
+                credentials["AccessKeyId"],
+                credentials["SecretAccessKey"],
+                credentials["SessionToken"],
+            ),
+            gateway_mcp_tools.SERVICE,
+            "us-east-1",
+        )
+        other = httpx.Request(
+            "POST",
+            self.URL,
+            content=b'{"jsonrpc":"2.0","method":"tools/list"}',
+            headers={"Content-Type": "application/json"},
+        )
+        list(auth.auth_flow(other))
+        self.assertNotEqual(signed, other.headers["Authorization"])
+
+    def test_omitting_credentials_signs_as_the_ambient_identity(self):
+        # The path every caller other than the policy proof takes, including an
+        # agent running in Runtime, where the ambient identity is the execution
+        # role and there is nothing to pass in.
+        ambient = Credentials("AKIARUNTIMEEXAMPLE", "secret", "runtime-token")
+
+        class Boto3:
+            Session = staticmethod(
+                lambda: type("S", (), {"get_credentials": lambda self: ambient})()
+            )
+
+        self.addCleanup(setattr, gateway_mcp_tools, "boto3", gateway_mcp_tools.boto3)
+        gateway_mcp_tools.boto3 = Boto3
+        headers = self.sign(None)
+
+        self.assertEqual(self.captured["url"], self.URL)
+        self.assertIn("AKIARUNTIMEEXAMPLE", headers["Authorization"])
+
+
+class ObservingADecisionTest(unittest.TestCase):
+    """call_tool_through_gateway returns a decision, including when it cannot connect."""
+
+    def setUp(self):
+        quiet(self)
+        self.started = []
+        self.stopped = []
+
+    def build(self, on_start=None, result=None, on_stop=None):
+        test = self
+
+        class Client:
+            def start(self):
+                test.started.append(True)
+                if on_start:
+                    raise on_start
+
+            def call_tool_sync(self, **kwargs):
+                return result
+
+            def stop(self, *args):
+                test.stopped.append(True)
+                if on_stop:
+                    raise on_stop
+
+        self.addCleanup(
+            setattr, attach_policy, "build_mcp_client", attach_policy.build_mcp_client
+        )
+        attach_policy.build_mcp_client = lambda *args, **kwargs: Client()
+
+    def call(self):
+        return attach_policy.call_tool_through_gateway(
+            "https://gw.example/mcp", "supportTools___lookup_order", {"order_id": "1"}
+        )
+
+    def test_a_refusal_at_connect_time_is_a_denial_not_a_crash(self):
+        # Measured live: the client raised MCPClientInitializationError from
+        # start(), which sat outside the try, so the exception escaped a function
+        # whose whole contract is to return a decision — and stopped the
+        # walkthrough on the call it exists to report on.
+        self.build(on_start=RuntimeError("the client initialization failed"))
+
+        allowed, text = self.call()
+
+        self.assertFalse(allowed)
+        self.assertIn("the client initialization failed", text)
+
+    def test_an_error_result_is_a_denial(self):
+        self.build(
+            result={
+                "status": "error",
+                "content": [{"text": "Tool Execution Denied: policy enforcement"}],
+            }
+        )
+        allowed, text = self.call()
+        self.assertFalse(allowed)
+        self.assertIn("Denied", text)
+
+    def test_a_successful_call_returns_the_tool_output(self):
+        self.build(result={"status": "success", "content": [{"text": '{"ok": true}'}]})
+        allowed, text = self.call()
+        self.assertTrue(allowed)
+        self.assertEqual(text, '{"ok": true}')
+        self.assertEqual(len(self.stopped), 1)
+
+    def test_a_client_that_will_not_stop_does_not_replace_the_decision(self):
+        # stop() on a client that failed to start raises over the top of the real
+        # failure, which is how a denial gets reported as a shutdown error.
+        self.build(
+            on_start=RuntimeError("connect refused"),
+            on_stop=RuntimeError("cannot stop what never started"),
+        )
+        allowed, text = self.call()
+        self.assertFalse(allowed)
+        self.assertIn("connect refused", text)
 
 
 class PolicyEnforcementProofTest(unittest.TestCase):

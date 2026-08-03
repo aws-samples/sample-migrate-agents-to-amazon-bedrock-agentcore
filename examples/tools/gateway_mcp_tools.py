@@ -16,6 +16,7 @@ import boto3
 import httpx
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
+from botocore.credentials import Credentials
 from mcp.client.streamable_http import streamablehttp_client
 from strands import Agent
 from strands.tools.mcp import MCPClient
@@ -56,6 +57,25 @@ class SigV4HTTPXAuth(httpx.Auth):
         yield request
 
 
+def _as_credentials(credentials):
+    """Accept either a botocore Credentials object or an AssumeRole response dict.
+
+    Measured: passing sts.assume_role()["Credentials"] straight through fails with
+    "'dict' object has no attribute 'token'" from inside SigV4Auth, several frames
+    below the call that supplied it and after the MCP client has already opened a
+    connection. The two shapes exist because Session.get_credentials() returns an
+    object and the STS API returns a JSON document; both are the obvious thing to
+    hand this function, so it takes either.
+    """
+    if isinstance(credentials, dict):
+        return Credentials(
+            credentials["AccessKeyId"],
+            credentials["SecretAccessKey"],
+            credentials.get("SessionToken"),
+        )
+    return credentials
+
+
 def build_mcp_client(
     gateway_url: str,
     region_name: str = "us-east-1",
@@ -73,7 +93,7 @@ def build_mcp_client(
     """
     if credentials is None:
         credentials = boto3.Session().get_credentials()
-    auth = SigV4HTTPXAuth(credentials, SERVICE, region_name)
+    auth = SigV4HTTPXAuth(_as_credentials(credentials), SERVICE, region_name)
     return MCPClient(lambda: streamablehttp_client(gateway_url, auth=auth))
 
     # For a CUSTOM_JWT gateway, drop the SigV4 auth and pass a bearer token
