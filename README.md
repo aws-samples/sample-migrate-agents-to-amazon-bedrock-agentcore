@@ -50,7 +50,8 @@ examples/
 │   ├── strands_agent.py            # Stage-2 entry point, its tools, and build_agent()
 │   └── policy/
 │       ├── support_tools.cedar     # Cedar rules authorizing each gateway tool call
-│       └── attach_policy.py        # Register the rules and attach them to the gateway
+│       ├── attach_policy.py        # Register the rules and attach them to the gateway
+│       └── demo_principals.py      # Two IAM-identical roles, so a denial is Cedar's
 ├── gateway/
 │   ├── create_gateway.py           # Create an AgentCore Gateway (MCP, AWS_IAM authorizer)
 │   ├── register_target.py          # Register a Lambda target and its tool schema
@@ -62,7 +63,9 @@ examples/
 ├── tools/
 │   └── gateway_mcp_tools.py        # Connect to a gateway as MCP tools (SigV4-signed)
 └── validation/
-    └── verify_diff_claim.py        # Measure the post's two-number claim from the tree
+    ├── verify_diff_claim.py        # Measure the post's two-number claim from the tree
+    ├── measure_walkthrough.py      # The numbers the walkthrough prints, taken as it runs
+    └── verify_policy_visibility.py # What each principal can see, not just call
 
 docs/
 └── security-comparison.md          # Self-hosted vs. AgentCore, and the three ways to stop an agent

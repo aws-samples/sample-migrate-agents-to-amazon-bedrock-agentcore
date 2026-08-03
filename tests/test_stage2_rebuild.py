@@ -134,6 +134,95 @@ class BuildAgentTest(unittest.TestCase):
             build_agent(memory_id="mem-1")
 
 
+class PartialVisibilityTest(unittest.TestCase):
+    """What the merge does when the gateway publishes only SOME of its tools.
+
+    Not hypothetical. Measured live: with a policy engine attached in ENFORCE
+    mode, the gateway filters tools/list per principal, so the manifest a caller
+    receives is a function of who is asking. build_agent supersedes on the names
+    it was handed, which means a principal denied a tool is never shown it, so
+    nothing supersedes the local stub of it.
+
+    These tests pin that behaviour rather than assert it is correct. If the
+    supersede rule is ever changed to use the target's registered manifest
+    instead of the principal's visible one — the fix named in
+    examples/validation/verify_policy_visibility.py — they fail by name, which is
+    the point: the decision at strands_agent.py:70-74 should not be reversed
+    silently in either direction.
+    """
+
+    def test_a_denied_tool_leaves_its_local_stub_registered(self):
+        # The read-only principal's manifest: lookup_order only.
+        visible = [t for t in real_gateway_tools() if t.tool_name == LOOKUP]
+
+        registered = sorted(
+            build_agent(extra_tools=visible).tool_registry.get_all_tools_config()
+        )
+
+        self.assertEqual(registered, ["process_return", "search_faq", LOOKUP])
+        # The finding, as an assertion: the tool Cedar refused is still callable
+        # in-process, under its bare name, on a path the gateway never sees.
+        self.assertIn("process_return", registered)
+        self.assertNotIn(PROCESS_RETURN, registered)
+
+    def test_an_empty_manifest_leaves_every_local_stub_registered(self):
+        # What an administrator holding no Cedar permit was measured to see.
+        registered = sorted(
+            build_agent(extra_tools=[]).tool_registry.get_all_tools_config()
+        )
+        self.assertEqual(registered, sorted(t.name for t in SUPPORT_TOOLS))
+
+
+class PolicyVisibilityReportTest(unittest.TestCase):
+    """The promoted visibility probe, with the MCP session faked."""
+
+    def setUp(self):
+        self.module = importlib.import_module(
+            "examples.validation.verify_policy_visibility"
+        )
+        self.stopped = 0
+
+    def _patch_client(self, tools):
+        """Hand the probe a client that publishes exactly `tools`."""
+        outer = self
+
+        class Recording(FakeMCPClient):
+            def stop(self, *args):
+                outer.stopped += 1
+
+        client = Recording(tools=tools)
+        unittest.mock.patch.object(
+            self.module, "build_mcp_client", lambda *a, **k: client
+        ).start()
+        self.addCleanup(unittest.mock.patch.stopall)
+        return client
+
+    def test_visible_tools_reports_what_the_principal_was_published(self):
+        self._patch_client([t for t in real_gateway_tools() if t.tool_name == LOOKUP])
+
+        names = [t.tool_name for t in self.module.visible_tools("https://gw", "us-east-1")]
+
+        self.assertEqual(names, [LOOKUP])
+
+    def test_an_empty_manifest_is_reported_rather_than_raised(self):
+        # A principal with no permit gets [], not an error. Raising here would
+        # read as a broken connection and hide the policy decision.
+        self._patch_client([])
+        self.assertEqual(self.module.visible_tools("https://gw", "us-east-1"), [])
+
+    def test_the_session_is_stopped_even_though_nothing_failed(self):
+        self._patch_client([])
+        self.module.visible_tools("https://gw", "us-east-1")
+        self.assertEqual(self.stopped, 1)
+
+    def test_registry_under_a_partial_manifest_shows_the_surviving_stub(self):
+        self._patch_client([t for t in real_gateway_tools() if t.tool_name == LOOKUP])
+
+        registered = self.module.registry_under("https://gw", "us-east-1")
+
+        self.assertEqual(registered, ["process_return", "search_faq", LOOKUP])
+
+
 class StageParityTest(unittest.TestCase):
     """Stage 2 is a rebuild of the same agent, so it cannot offer less."""
 
