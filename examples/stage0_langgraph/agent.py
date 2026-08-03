@@ -45,8 +45,16 @@ class SupportState(TypedDict):
 
 
 def classify_intent(state: SupportState, llm) -> dict:
-    """Ask the model for one word, and accept only the two words we asked for."""
-    response = llm.invoke([SystemMessage(ROUTER_PROMPT), *state["messages"]])
+    """Ask the model for one word, and accept only the two words we asked for.
+
+    The customer's turns only. ROUTER_PROMPT classifies "the customer's latest
+    message", so the assistant's replies and the tool traffic are not input to the
+    decision — and passing them costs something: this llm has no tools bound, and
+    Converse rejects a request carrying toolResult blocks with no toolConfig, so
+    the client rewrites those blocks as text and warns while doing it.
+    """
+    customer_turns = [m for m in state["messages"] if m.type == "human"]
+    response = llm.invoke([SystemMessage(ROUTER_PROMPT), *customer_turns])
     answer = response.text.strip().lower()
     return {"intent": answer if answer in ("escalate", "assist") else "assist"}
 
