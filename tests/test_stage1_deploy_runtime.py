@@ -387,8 +387,62 @@ class InvokeFailureTest(unittest.TestCase):
         self.assertIn("CloudWatch", text)
         self.assertIn("requirements.txt", text)
 
+    def test_the_advice_names_the_fix_and_the_wrong_turn_it_prevents(self):
+        """Saying the message is misleading is not enough on its own.
+
+        The expensive part of this trap is not that the reader is confused, it is
+        the specific thing a believed timeout message makes them do: tune the
+        startup they were told to make faster. So the advice has to name
+        vendoring as the fix and the timeout as the thing not to touch, and
+        without this the "before touching any timeout" clause could be dropped
+        while the assertions above all still pass.
+        """
+        text = self.explain(
+            "Runtime initialization time exceeded. Ensure initialization completes in 30s"
+        )
+        self.assertIn("vendored", text)
+        self.assertIn("timeout", text)
+        self.assertIn("not installed", text)
+
+    def test_a_failed_invoke_prints_the_advice_rather_than_only_the_error(self):
+        """The advice is reached from invoke(), not just correct in isolation.
+
+        Everything else here calls _explain_invoke_failure directly, which would
+        keep passing if the call at the one site that has the error in hand were
+        deleted. This is the only place a reader ever sees it.
+        """
+        message = "Runtime initialization time exceeded. Ensure initialization completes in 30s"
+
+        class Failing:
+            def invoke_agent_runtime(self, **kwargs):
+                raise RuntimeError(message)
+
+        with mock.patch.object(deploy_runtime.boto3, "client", lambda *a, **kw: Failing()):
+            with redirect_stdout(io.StringIO()) as out:
+                with self.assertRaises(RuntimeError):
+                    deploy_runtime.invoke("arn:aws:…:runtime/x", "hi", "s" * 33, "us-east-1")
+        printed = out.getvalue()
+        self.assertIn("invoke failed", printed)
+        self.assertIn("misleading", printed)
+        self.assertIn("vendored", printed)
+
     def test_an_unrelated_error_gets_no_advice(self):
         self.assertEqual(self.explain("AccessDeniedException"), "")
+
+    def test_an_unrelated_invoke_failure_is_reported_without_the_advice(self):
+        """An AccessDenied must not be dressed up as a vendoring problem."""
+
+        class Denied:
+            def invoke_agent_runtime(self, **kwargs):
+                raise RuntimeError("AccessDeniedException: not authorized to invoke")
+
+        with mock.patch.object(deploy_runtime.boto3, "client", lambda *a, **kw: Denied()):
+            with redirect_stdout(io.StringIO()) as out:
+                with self.assertRaises(RuntimeError):
+                    deploy_runtime.invoke("arn:aws:…:runtime/x", "hi", "s" * 33, "us-east-1")
+        printed = out.getvalue()
+        self.assertIn("AccessDeniedException", printed)
+        self.assertNotIn("misleading", printed)
 
 
 def install_deploy_doubles(test, build=None) -> None:
