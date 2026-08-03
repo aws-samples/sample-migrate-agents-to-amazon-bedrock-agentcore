@@ -1,6 +1,6 @@
 # Migrating Agentic Workloads to Amazon Bedrock AgentCore
 
-This repository contains sample code for the AWS blog post [Migrating agentic workloads to Amazon Bedrock AgentCore from other platforms](https://aws.amazon.com/blogs/machine-learning/). It demonstrates how to migrate existing AI agents from frameworks like LangGraph and CrewAI to [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
+This repository contains sample code for the AWS blog post [Migrating agentic workloads to Amazon Bedrock AgentCore from other platforms](https://aws.amazon.com/blogs/machine-learning/). It demonstrates how to migrate an existing LangGraph agent to [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
 
 > **Important:** This sample code is for demonstration and educational purposes only. Review and adapt security configurations, error handling, and resource sizing for your production environment.
 
@@ -12,7 +12,7 @@ This repository contains sample code for the AWS blog post [Migrating agentic wo
 
 The samples show two migration paths:
 
-- **Replatform**: Wrap your existing agent (LangGraph, CrewAI) with `BedrockAgentCoreApp` to run on AgentCore Runtime without rewriting agent logic.
+- **Replatform**: Keep the agent you have and replace what surrounds it, so the agent logic is not rewritten (`examples/stage1_replatform/`).
 - **Rebuild**: Rewrite your agent using the [Strands Agents SDK](https://github.com/strands-agents/sdk-python) for tighter AgentCore integration and model-driven orchestration.
 
 The blog post describes a third path, handing the orchestration loop to the AgentCore harness, which has no sample code in this repository.
@@ -29,17 +29,13 @@ examples/
 │   └── lambda_target/
 │       ├── lambda_function.py  # Lambda handler backing the gateway target
 │       └── deploy.sh           # Create the execution role and function from scratch
-├── replatform/
-│   ├── langgraph_agent.py      # Wrap a LangGraph agent for AgentCore Runtime
-│   └── crewai_agent.py         # Wrap a CrewAI agent for AgentCore Runtime
 ├── stage2_rebuild/
 │   ├── strands_agent.py        # Rebuild with Strands Agents SDK (memory-backed)
 │   └── policy/
 │       ├── support_tools.cedar # Cedar rules authorizing each gateway tool call
 │       └── attach_policy.py    # Register the rules and attach them to the gateway
 ├── tools/
-│   ├── gateway_mcp_tools.py    # Connect to a gateway as MCP tools (SigV4-signed)
-│   └── inventory_tools.py      # Inventory existing tools before migration
+│   └── gateway_mcp_tools.py    # Connect to a gateway as MCP tools (SigV4-signed)
 ├── memory/
 │   └── configure_memory.py     # Set up AgentCore Memory (summary, preference, semantic)
 └── validation/
