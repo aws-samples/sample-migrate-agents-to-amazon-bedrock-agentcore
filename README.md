@@ -39,7 +39,7 @@ examples/
 ├── memory/
 │   └── configure_memory.py     # Set up AgentCore Memory (summary, preference, semantic)
 └── validation/
-    └── validate_migration.py   # Validate agent behavior post-migration
+    └── verify_diff_claim.py    # Measure the post's two-number claim from the tree
 
 docs/
 └── security-comparison.md      # Security architecture: self-hosted vs. AgentCore

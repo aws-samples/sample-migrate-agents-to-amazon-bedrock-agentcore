@@ -18,7 +18,7 @@ import os
 import boto3
 
 # Tool definitions published to MCP clients through the gateway. These match the
-# lookup_order / process_return tools in examples/rebuild/strands_agent.py.
+# lookup_order / process_return tools in examples/stage2_rebuild/strands_agent.py.
 TOOL_SCHEMA = [
     {
         "name": "lookup_order",

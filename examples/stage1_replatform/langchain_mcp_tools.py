@@ -69,9 +69,10 @@ def merge_tools(local_tools, gateway_tools):
 
     Gateway publishes tools as "<targetName>___<name>", so the suffix after the
     last "___" is what collides with a local tool. This is the LangGraph
-    restatement of the guard at examples/rebuild/strands_agent.py:63-69, which
-    reads .tool_name; LangChain tools expose .name instead, so the logic has to
-    be re-expressed rather than copied.
+    restatement of the guard in build_agent() in
+    examples/stage2_rebuild/strands_agent.py, which reads .tool_name; LangChain
+    tools expose .name instead, so the logic has to be re-expressed rather than
+    copied.
 
     Local tools the gateway does not publish are kept. search_faq is that case,
     and it is why a partial migration is expressible here at all.
