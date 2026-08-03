@@ -50,6 +50,18 @@ def _wait_until_ready(client, gateway_id: str, timeout: int = 120) -> dict:
         time.sleep(2)
 
 
+def existing_gateway_id(name: str, region_name: str = "us-east-1") -> Optional[str]:
+    """Whether a gateway of this name is already there, before create_gateway runs.
+
+    Asked by the walkthrough so the number it prints beside CreateGateway can say
+    whether a gateway was provisioned or looked up. Provisioning takes seconds and
+    a lookup takes a fraction of one, so the two are different quantities under
+    one label.
+    """
+    client = boto3.client("bedrock-agentcore-control", region_name=region_name)
+    return _find_existing_gateway(client, name)
+
+
 def create_gateway(
     name: str,
     role_arn: str,

@@ -72,6 +72,16 @@ def _find_existing_target(client, gateway_id: str, name: str) -> Optional[str]:
     return None
 
 
+def existing_target_id(
+    gateway_id: str,
+    target_name: str = "supportTools",
+    region_name: str = "us-east-1",
+) -> Optional[str]:
+    """Whether this target is already on the gateway, before register_target runs."""
+    client = boto3.client("bedrock-agentcore-control", region_name=region_name)
+    return _find_existing_target(client, gateway_id, target_name)
+
+
 def register_target(
     gateway_id: str,
     lambda_arn: str,

@@ -22,8 +22,10 @@ Run from the repository root:
     python -m unittest discover -s tests -v
 """
 
+import ast
 import contextlib
 import importlib
+import inspect
 import io
 import os
 import unittest
@@ -1548,6 +1550,85 @@ class MemoryReuseTest(unittest.TestCase):
             configure_memory_module._find_existing_memory(self.plane), memory_id
         )
         self.assertTrue(memory_id.startswith(MEMORY_NAME + "-"))
+
+
+class ProvisioningLabelTest(unittest.TestCase):
+    """Which branch produced each provisioning number, on the row that prints it.
+
+    The three timings around the AgentCore creates are the ones the article
+    quotes, and all three creates now reuse what they find. A re-run that reports
+    a 0.7s list-and-get under "memory CreateMemory -> ACTIVE" is off by two
+    orders of magnitude against the same label on a clean account.
+    """
+
+    def setUp(self):
+        quiet(self)
+        self.measured = Measurements()
+
+    def timed(self, note):
+        with run_walkthrough._optional_timing(self.measured, "a create", note):
+            pass
+        return self.measured.taken[-1][3]
+
+    def test_the_two_branches_do_not_read_the_same(self):
+        self.assertNotEqual(run_walkthrough.PROVISIONED, run_walkthrough.REUSED)
+        self.assertIn("not a create", run_walkthrough.REUSED)
+
+    def test_a_note_reaches_the_row(self):
+        self.assertEqual(self.timed(run_walkthrough.PROVISIONED), "provisioned by this run")
+
+    def test_measuring_off_still_takes_a_note_without_recording(self):
+        with run_walkthrough._optional_timing(None, "a create", run_walkthrough.REUSED):
+            pass
+        self.assertEqual(self.measured.taken, [])
+
+    def timing_call_sites(self):
+        """Every _optional_timing call in the walkthrough, as (name, has a note).
+
+        Read off the syntax tree rather than by counting strings, because what
+        matters is whether the call that prints a given label passes a branch at
+        all — and a string count cannot tell a provisioning timing from a timing
+        of a conversational turn.
+        """
+        sites = []
+        for node in ast.walk(ast.parse(inspect.getsource(run_walkthrough))):
+            if not isinstance(node, ast.Call):
+                continue
+            if getattr(node.func, "id", None) != "_optional_timing":
+                continue
+            label = node.args[1]
+            sites.append(
+                (
+                    label.value if isinstance(label, ast.Constant) else "<computed>",
+                    len(node.args) > 2 or any(kw.arg == "note" for kw in node.keywords),
+                )
+            )
+        return sites
+
+    def test_every_timing_that_names_a_resource_says_which_branch_it_took(self):
+        """A later edit that adds a fifth timed create, or drops a note from one
+        of the four, puts an unlabelled provisioning number back in the table."""
+        sites = self.timing_call_sites()
+        provisioning = [
+            (name, noted)
+            for name, noted in sites
+            if "Create" in name or name == "target registration"
+        ]
+
+        self.assertEqual(len(provisioning), 4, dict(sites))
+        for name, noted in provisioning:
+            self.assertTrue(noted, f"{name} claims a create with no branch note")
+
+        # The rest time a conversational turn rather than a resource, so they
+        # have no create to disclaim. Named here so that a new provisioning
+        # timing cannot arrive unnoticed by being neither.
+        self.assertEqual(
+            sorted(name for name, noted in sites if not noted),
+            [
+                "stage 0 turn, local tools + in-process state",
+                "stage 1 turn, Gateway tools + AgentCore Memory",
+            ],
+        )
 
 
 class MeasurementTableTest(unittest.TestCase):

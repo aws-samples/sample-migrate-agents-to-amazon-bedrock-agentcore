@@ -50,6 +50,16 @@ def _find_existing_memory(client, name: str = MEMORY_NAME) -> Optional[str]:
     return None
 
 
+def existing_memory_id(region_name: str = "us-east-1") -> Optional[str]:
+    """Whether our memory is already there, before configure_memory runs.
+
+    Memory is the slowest thing this walkthrough provisions — minutes, not
+    seconds — so a reused one reported under a CreateMemory label is the most
+    misleading number of the set.
+    """
+    return _find_existing_memory(MemoryClient(region_name=region_name))
+
+
 def configure_memory(
     region_name: str = "us-east-1",
     event_expiry_days: int = EVENT_EXPIRY_DAYS,

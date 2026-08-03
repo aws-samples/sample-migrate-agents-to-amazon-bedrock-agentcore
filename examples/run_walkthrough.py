@@ -84,12 +84,13 @@ from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from examples.gateway.create_gateway import create_gateway
-from examples.gateway.register_target import register_target
+from examples.gateway.create_gateway import create_gateway, existing_gateway_id
+from examples.gateway.register_target import existing_target_id, register_target
 from examples.memory.configure_memory import (
     EVENT_EXPIRY_DAYS,
     MEMORY_NAME,
     configure_memory,
+    existing_memory_id,
 )
 from examples.stage0_langgraph.agent import build_graph
 from examples.stage0_langgraph.local_api import running_stub
@@ -343,13 +344,23 @@ def run_stage0(
 
 
 @contextmanager
-def _optional_timing(measured, name: str):
+def _optional_timing(measured, name: str, note: str = ""):
     """Time a block when measuring, and do nothing when not."""
     if measured is None:
         yield
         return
-    with measured.timing(name):
+    with measured.timing(name, note):
         yield
+
+
+# What the note on a provisioning timing says, on each of the two branches. Every
+# create in this walkthrough reuses what it finds, so four of the numbers it
+# prints time a provisioning on a clean account and something much cheaper on a
+# re-run. The names read like creates, so the branch belongs on the row, and each
+# reuse note also says what did run — a lookup and an update are not the same
+# number either.
+PROVISIONED = "provisioned by this run"
+REUSED = "already existed, so not a create"
 
 
 def run_stage1(
@@ -463,7 +474,13 @@ def deploy_to_runtime(
     # createdAt -> lastUpdatedAt delta means something different on each branch.
     was_already_there = deploy_runtime.existing_runtime_id(region_name) is not None
 
-    with _optional_timing(measured, "runtime CreateAgentRuntime -> READY"):
+    with _optional_timing(
+        measured,
+        "runtime CreateAgentRuntime -> READY",
+        f"{REUSED}: the zip upload, an UpdateAgentRuntime and its wait"
+        if was_already_there
+        else PROVISIONED,
+    ):
         runtime_id, runtime_arn, _ = deploy_runtime.deploy(
             gateway_url, memory_id, actor_id, region_name
         )
@@ -840,20 +857,41 @@ def run(args: argparse.Namespace) -> None:
     measured = None if args.no_measure else Measurements()
     try:
         if args.stage in AGENTCORE_STAGES:
-            # Timed from the CreateGateway call to the first READY from
-            # GetGateway, which is what create_gateway waits for. On a re-run it
-            # reuses the existing gateway and this number is a GetGateway, so it
-            # is labelled with which of the two happened.
-            with _optional_timing(measured, "gateway CreateGateway -> READY"):
+            # Asked before each create, because afterwards the answer is always
+            # yes. Timed from the CreateGateway call to the first READY from
+            # GetGateway, which is what create_gateway waits for; on a re-run the
+            # same block is a ListGateways and a GetGateway, so the row says so.
+            fresh_gateway = (
+                existing_gateway_id(args.gateway_name, region) is None
+            )
+            with _optional_timing(
+                measured,
+                "gateway CreateGateway -> READY",
+                PROVISIONED if fresh_gateway else f"{REUSED}: a list and a get",
+            ):
                 gateway_id, gateway_url = create_gateway(
                     args.gateway_name, args.role_arn, region
                 )
             created["gateway_id"] = gateway_id
-            with _optional_timing(measured, "target registration"):
+
+            fresh_target = (
+                existing_target_id(gateway_id, args.target_name, region) is None
+            )
+            with _optional_timing(
+                measured,
+                "target registration",
+                PROVISIONED if fresh_target else f"{REUSED}: an UpdateGatewayTarget",
+            ):
                 created["target_id"] = register_target(
                     gateway_id, args.lambda_arn, args.target_name, region
                 )
-            with _optional_timing(measured, "memory CreateMemory -> ACTIVE"):
+
+            fresh_memory = existing_memory_id(region) is None
+            with _optional_timing(
+                measured,
+                "memory CreateMemory -> ACTIVE",
+                PROVISIONED if fresh_memory else f"{REUSED}: a list and a get",
+            ):
                 created["memory_id"] = configure_memory(
                     region, args.event_expiry_days
                 )
