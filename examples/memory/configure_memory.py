@@ -21,6 +21,12 @@ from bedrock_agentcore.memory import MemoryClient
 # for longer than that.
 EVENT_EXPIRY_DAYS = 30
 
+# The service appends a suffix, so the memory id comes back as
+# MigratedAgentMemory-XXXXXXXXXX. Named here rather than inline in the call
+# because teardown has to find this resource by name in an account it did not
+# create it in, and a name spelled in two places is a name that drifts.
+MEMORY_NAME = "MigratedAgentMemory"
+
 
 def configure_memory(
     region_name: str = "us-east-1",
@@ -29,7 +35,7 @@ def configure_memory(
     """Create the migrated agent's memory resource and return its memory id."""
     client = MemoryClient(region_name=region_name)
     memory = client.create_memory_and_wait(
-        name="MigratedAgentMemory",
+        name=MEMORY_NAME,
         description="Memory for migrated customer support agent",
         event_expiry_days=event_expiry_days,
         strategies=[

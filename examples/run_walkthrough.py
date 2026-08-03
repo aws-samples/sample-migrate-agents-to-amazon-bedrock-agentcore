@@ -43,6 +43,16 @@ then the Cedar policies and their engine. Every step is attempted even if an
 earlier one failed, because a delete that skips the rest of the list is how
 resources get orphaned. The Lambda and the two IAM roles come from
 examples/gateway/lambda_target/deploy.sh and are not deleted here.
+
+--teardown with no --stage is the recovery path, and it is the one to reach for
+when a run has already died:
+
+    python -m examples.run_walkthrough --teardown --dry-run
+    python -m examples.run_walkthrough --teardown
+
+It finds the gateway, target, memory, policy engine and policies by the names
+this walkthrough gives them and deletes those, so it works from a different
+process than the one that created them. It needs neither ARN.
 """
 
 import argparse
@@ -59,13 +69,18 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from examples.gateway.create_gateway import create_gateway
 from examples.gateway.register_target import register_target
-from examples.memory.configure_memory import EVENT_EXPIRY_DAYS, configure_memory
+from examples.memory.configure_memory import (
+    EVENT_EXPIRY_DAYS,
+    MEMORY_NAME,
+    configure_memory,
+)
 from examples.stage0_langgraph.agent import build_graph
 from examples.stage0_langgraph.local_api import running_stub
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
 from examples.stage1_replatform.agentcore_memory_saver import AgentCoreMemorySaver
 from examples.stage1_replatform.langchain_mcp_tools import merge_tools, to_langchain_tools
 from examples.stage2_rebuild.policy.attach_policy import (
+    POLICY_ENGINE_NAME,
     caller_principal,
     call_tool_through_gateway,
     delete_policies,
@@ -412,42 +427,126 @@ def run_stage2(
     _report_decision("process_return", allowed, text)
 
 
+def discover_resources(
+    gateway_name: str,
+    memory_name: str = MEMORY_NAME,
+    engine_name: str = POLICY_ENGINE_NAME,
+    region_name: str = "us-east-1",
+) -> dict:
+    """Find what a previous run of this walkthrough left in the account, by name.
+
+    A ledger built in this process only covers resources this process created, so
+    it cannot help the reader whose run died in another terminal an hour ago. The
+    names are all deterministic — the gateway and the engine are named exactly,
+    and the service suffixes the memory — so the account can be asked instead of
+    remembered.
+
+    Returns the same keys teardown takes, so a discovered ledger and a live one
+    are deleted by the same code path.
+    """
+    control = boto3.client("bedrock-agentcore-control", region_name=region_name)
+    found = {"gateway_id": "", "target_id": "", "memory_id": ""}
+
+    for page in control.get_paginator("list_gateways").paginate():
+        for summary in page.get("items", []):
+            if summary.get("name") == gateway_name:
+                found["gateway_id"] = summary["gatewayId"]
+    if found["gateway_id"]:
+        for page in control.get_paginator("list_gateway_targets").paginate(
+            gatewayIdentifier=found["gateway_id"]
+        ):
+            for summary in page.get("items", []):
+                found["target_id"] = summary["targetId"]
+
+    for page in control.get_paginator("list_memories").paginate():
+        for summary in page.get("memories", []):
+            # The suffix is the service's; the prefix and the separator are ours.
+            if summary["id"].startswith(memory_name + "-"):
+                found["memory_id"] = summary["id"]
+
+    for page in control.get_paginator("list_policy_engines").paginate():
+        for summary in page.get("policyEngines", []):
+            if summary.get("name") == engine_name:
+                engine_id = summary["policyEngineId"]
+                found["policy_engine_id"] = engine_id
+                policy_ids = []
+                for policies in control.get_paginator("list_policies").paginate(
+                    policyEngineId=engine_id
+                ):
+                    policy_ids += [
+                        policy["policyId"] for policy in policies.get("policies", [])
+                    ]
+                found["policy_ids"] = policy_ids
+    return found
+
+
+def _print_ledger(found: dict) -> bool:
+    """Print what teardown would delete. Returns whether anything was found."""
+    labels = (
+        ("gateway_id", "gateway"),
+        ("target_id", "gateway target"),
+        ("memory_id", "memory"),
+        ("policy_engine_id", "policy engine"),
+    )
+    anything = False
+    for key, label in labels:
+        if found.get(key):
+            print(f"  {label}: {found[key]}")
+            anything = True
+    for policy_id in found.get("policy_ids", ()):
+        print(f"  policy: {policy_id}")
+        anything = True
+    if not anything:
+        print("  nothing found")
+    return anything
+
+
 def run(args: argparse.Namespace) -> None:
     region = args.region
     stages = ("0", "1", "2") if args.stage == "all" else (args.stage,)
     session_id = f"walkthrough-{uuid.uuid4().hex[:8]}"
     actor_id = f"customer-{uuid.uuid4().hex[:8]}"
 
-    gateway_id = target_id = memory_id = ""
     gateway_url = gateway_arn = ""
-    # Stage 2's resources land here as they are created, so teardown can delete
-    # them even if the stage raises half way through creating them.
+    # Every resource lands here the moment it exists, and teardown deletes
+    # whatever is in it. Creation is inside the try for the same reason: a
+    # gateway created and then lost to a failure in the next call is a resource
+    # nobody knows to look for, and --teardown that skips it because the run
+    # never reached the try block is the flag not doing what it says.
     created = {}
-    if args.stage in AGENTCORE_STAGES:
-        gateway_id, gateway_url = create_gateway(
-            args.gateway_name, args.role_arn, region
-        )
-        target_id = register_target(
-            gateway_id, args.lambda_arn, args.target_name, region
-        )
-        memory_id = configure_memory(region, args.event_expiry_days)
-        if "2" in stages:
-            # Cedar names the gateway by ARN, which create_gateway does not return.
-            gateway_arn = boto3.client(
-                "bedrock-agentcore-control", region_name=region
-            ).get_gateway(gatewayIdentifier=gateway_id)["gatewayArn"]
-
     try:
+        if args.stage in AGENTCORE_STAGES:
+            gateway_id, gateway_url = create_gateway(
+                args.gateway_name, args.role_arn, region
+            )
+            created["gateway_id"] = gateway_id
+            created["target_id"] = register_target(
+                gateway_id, args.lambda_arn, args.target_name, region
+            )
+            created["memory_id"] = configure_memory(region, args.event_expiry_days)
+            if "2" in stages:
+                # Cedar names the gateway by ARN, which create_gateway does not
+                # return.
+                gateway_arn = boto3.client(
+                    "bedrock-agentcore-control", region_name=region
+                ).get_gateway(gatewayIdentifier=gateway_id)["gatewayArn"]
+
         if "0" in stages:
             run_stage0(region, session_id)
         if "1" in stages:
-            run_stage1(gateway_url, memory_id, actor_id, session_id, region)
+            run_stage1(
+                gateway_url,
+                created["memory_id"],
+                actor_id,
+                session_id,
+                region,
+            )
         if "2" in stages:
             run_stage2(
-                gateway_id,
+                created["gateway_id"],
                 gateway_url,
                 gateway_arn,
-                memory_id,
+                created["memory_id"],
                 actor_id,
                 f"{session_id}-strands",
                 region,
@@ -456,13 +555,33 @@ def run(args: argparse.Namespace) -> None:
     finally:
         if args.teardown:
             teardown(
-                gateway_id,
-                target_id,
-                memory_id,
+                created.get("gateway_id", ""),
+                created.get("target_id", ""),
+                created.get("memory_id", ""),
                 region,
                 policy_engine_id=created.get("policy_engine_id", ""),
                 policy_ids=created.get("policy_ids", ()),
             )
+
+
+def run_teardown_only(args: argparse.Namespace) -> None:
+    """Delete what an earlier run left behind, without running anything first."""
+    found = discover_resources(args.gateway_name, region_name=args.region)
+    print("Found in this account:")
+    anything = _print_ledger(found)
+    if not anything or args.dry_run:
+        if args.dry_run:
+            print("--dry-run: nothing deleted")
+        return
+    print()
+    teardown(
+        found.get("gateway_id", ""),
+        found.get("target_id", ""),
+        found.get("memory_id", ""),
+        args.region,
+        policy_engine_id=found.get("policy_engine_id", ""),
+        policy_ids=found.get("policy_ids", ()),
+    )
 
 
 def main() -> None:
@@ -470,8 +589,11 @@ def main() -> None:
     parser.add_argument(
         "--stage",
         choices=("0", "1", "2", "all"),
-        default="all",
-        help="Which stage to run (default: all).",
+        # No default, so that --teardown on its own is a teardown rather than a
+        # whole second walkthrough followed by one. run() still treats a missing
+        # --stage as "all".
+        default=None,
+        help="Which stage to run (default: all, unless --teardown is the only flag).",
     )
     parser.add_argument(
         "--role-arn",
@@ -512,10 +634,24 @@ def main() -> None:
         action="store_true",
         help=(
             "Delete the gateway target, gateway, memory and Cedar policies after "
-            "running."
+            "running. On its own, with no --stage, it deletes what an earlier run "
+            "left in the account instead of running anything."
         ),
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --teardown and no --stage, list what would be deleted and stop.",
+    )
     args = parser.parse_args()
+
+    # --teardown with no --stage is the recovery path: an earlier run died, its
+    # identifiers went with the process, and the resources are still billing.
+    if args.teardown and args.stage is None:
+        run_teardown_only(args)
+        return
+    if args.stage is None:
+        args.stage = "all"
 
     # Stage 0 creates nothing, so it needs neither ARN. Stage 2 needs both because
     # it reuses the gateway, target and memory that stage 1 stands up.
