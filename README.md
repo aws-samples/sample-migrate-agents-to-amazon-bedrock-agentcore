@@ -94,20 +94,14 @@ git clone https://github.com/aws-samples/sample-migrate-agents-to-amazon-bedrock
 cd sample-migrate-agents-to-amazon-bedrock-agentcore
 ```
 
-2. Run the setup script (creates a virtual environment, installs dependencies, verifies AWS credentials):
+2. Run the setup script. It creates a virtual environment, installs dependencies, and warns — rather
+   than fails — if the AWS CLI or credentials are missing, because steps 3 and 4 need neither:
 
 ```bash
 ./setup.sh
 ```
 
-3. Activate the environment and run an example:
-
-```bash
-source .venv/bin/activate
-python -m examples.stage2_rebuild.strands_agent
-```
-
-Alternatively, install manually:
+Or install manually, which is the same thing without the checks:
 
 ```bash
 python3 -m venv .venv
@@ -115,12 +109,34 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The test suite needs no credentials and creates nothing — the chat model, the gateway, the memory
-service and the Cedar evaluator are faked, everything else is real:
+3. Run the test suite. **No credentials, and it creates nothing** — the chat model, the gateway, the
+   memory service and the Cedar evaluator are faked, everything else is real:
 
 ```bash
+source .venv/bin/activate
 python -m pytest tests/ -q
 ```
+
+4. Run the stage-0 agent — the agent before any migration, and the last step that creates nothing in
+   your account. **Needs AWS credentials and Amazon Bedrock model access for the model named in
+   `examples/stage0_langgraph/run_local.py`, and nothing else:** no Gateway, no Memory, no Runtime, no
+   Policy. It starts its own orders-API stub on a loopback port, so this one command is the whole of
+   it:
+
+```bash
+python -m examples.stage0_langgraph.run_local
+```
+
+It holds two turns on one `thread_id` and answers the second without being told the order number
+again, which is the in-process checkpointer being visible; then a third turn escalates without
+reaching the model's tool loop.
+
+5. Then work through [Run order](#run-order) for the migration itself. **Everything from here creates
+   real AWS resources and costs money**: `examples/gateway/lambda_target/deploy.sh` first — the one
+   script that needs the AWS CLI — then `examples/run_walkthrough.py`, which takes the two ARNs that
+   script prints. `examples/stage2_rebuild/strands_agent.py` comes last of all, because it expects a
+   gateway, a gateway target, an AgentCore Memory resource and attached Cedar policies to exist
+   already.
 
 ## Run order
 
