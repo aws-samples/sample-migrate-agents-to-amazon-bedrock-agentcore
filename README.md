@@ -228,9 +228,11 @@ Both ARNs are printed by `examples/gateway/lambda_target/deploy.sh`:
 role ARN that the same script creates.
 
 The individual scripts also run on their own, taking the previous step's output as an argument or
-an environment variable — `create_gateway.py` and `register_target.py` read `GATEWAY_ID`,
-`gateway_mcp_tools.py` and `stage1_replatform/agent_runtime.py` read `GATEWAY_URL`, and both
-Runtime entry points read `AGENTCORE_MEMORY_ID`.
+an environment variable — `register_target.py` and `stage2_rebuild/policy/attach_policy.py` read
+`GATEWAY_ID`, `gateway_mcp_tools.py`, `agent_runtime.py` and `deploy_runtime.py` read `GATEWAY_URL`,
+and both Runtime entry points and `deploy_runtime.py` read `AGENTCORE_MEMORY_ID`. `create_gateway.py`
+reads neither, because it is the step that creates the gateway: it takes `GATEWAY_NAME` and
+`GATEWAY_ROLE_ARN`. Every one of them takes `AWS_REGION` and defaults it to `us-east-1`.
 
 ## Deploying to Runtime
 
