@@ -67,6 +67,7 @@ from tests.fake_control_plane import (
     FakeBoto3,
     FakeClock,
     FakeIAMClient,
+    FakeLogsClient,
     FakeSTSClient,
     ValidationException,
 )
@@ -1391,6 +1392,37 @@ class TeardownTest(unittest.TestCase):
     def test_a_run_that_created_no_roles_does_not_touch_iam(self):
         self.full_teardown()
         self.assertNotIn("demo IAM roles", self.attempted)
+
+    def test_the_teardown_does_not_say_it_left_behind_what_it_deletes(self):
+        """One printed run, read as a reader reads it: end to end.
+
+        delete_runtime's own line is about what DeleteAgentRuntime did not
+        cascade to, and the group is deleted eight lines later. Printed as
+        "left behind" it was the teardown contradicting itself, which is the
+        same defect as a measurement labelled with a state it never reached.
+        """
+        group = self.RUNTIME_KWARGS["log_groups"][0]
+        # The real delete_runtime and delete_log_group, so their prints happen.
+        # Only the bucket and the role are stubbed, since S3 and IAM have nothing
+        # to say about this ordering.
+        logs = FakeLogsClient(groups=[group])
+        patch_boto3(
+            self,
+            run_walkthrough.deploy_runtime,
+            **{"bedrock-agentcore-control": self.control, "logs": logs},
+        )
+        patch_clock(self, run_walkthrough.deploy_runtime)
+        self.replace(run_walkthrough.deploy_runtime, "delete_bucket", self._recorder("b"))
+        self.replace(run_walkthrough.deploy_runtime, "delete_role", self._recorder("r"))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.full_teardown(**self.RUNTIME_KWARGS)
+        printed = out.getvalue()
+
+        self.assertIn(f"Deleted log group {group}", printed)
+        self.assertNotIn("left behind", printed)
+        self.assertIn(f"not deleted with it: {group}", printed)
 
 
 class TargetRegistrationTest(unittest.TestCase):

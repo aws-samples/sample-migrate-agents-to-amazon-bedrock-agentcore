@@ -559,7 +559,9 @@ def delete_runtime(runtime_id: str, region_name: str = "us-east-1") -> None:
             control.get_agent_runtime(agentRuntimeId=runtime_id)
         except control.exceptions.ResourceNotFoundException:
             print(f"Deleted runtime {runtime_id}")
-            print(f"  log group left behind: {log_group_name(runtime_id)}")
+            # What DeleteAgentRuntime did not do, not a claim about how the
+            # teardown ends: the caller deletes this group as its own last step.
+            print(f"  not deleted with it: {log_group_name(runtime_id)}")
             return
         time.sleep(2)
     raise TimeoutError(f"Runtime {runtime_id} still present after 180s")

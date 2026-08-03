@@ -205,6 +205,30 @@ class FakeAgentCoreControlClient:
         self._delete_gets[target_id] = self.delete_lag
         return {}
 
+    # -- agent runtime --------------------------------------------------------
+
+    def delete_agent_runtime(self, **kwargs):
+        self.calls.append(("delete_agent_runtime", kwargs))
+        runtime_id = kwargs["agentRuntimeId"]
+        if runtime_id in self.deleted:
+            raise ResourceNotFoundException(f"{runtime_id} not found")
+        self.deleted.append(runtime_id)
+        self._delete_gets[runtime_id] = self.delete_lag
+        return {}
+
+    def get_agent_runtime(self, **kwargs):
+        self.calls.append(("get_agent_runtime", kwargs))
+        runtime_id = kwargs["agentRuntimeId"]
+        if runtime_id not in self.deleted:
+            return {"agentRuntimeId": runtime_id, "status": "READY"}
+        # Same delete_lag as every other resource here: a Get can still succeed
+        # after the Delete returned.
+        remaining = self._delete_gets.get(runtime_id, 0)
+        if remaining <= 0:
+            raise ResourceNotFoundException(f"{runtime_id} not found")
+        self._delete_gets[runtime_id] = remaining - 1
+        return {"agentRuntimeId": runtime_id, "status": "DELETING"}
+
     # -- policy engine and policies -------------------------------------------
 
     def create_policy_engine(self, **kwargs):
@@ -324,6 +348,27 @@ class _IamExceptions:
     NoSuchEntityException = NoSuchEntityException
     EntityAlreadyExistsException = EntityAlreadyExistsException
     ClientError = ClientError
+
+
+class FakeLogsClient:
+    """CloudWatch Logs, only the call teardown makes.
+
+    A group that was never written to was never created, so asking for one that
+    does not exist has to be ordinary rather than a failure.
+    """
+
+    exceptions = _Exceptions
+
+    def __init__(self, groups=()):
+        self.groups = list(groups)
+        self.deleted = []
+
+    def delete_log_group(self, logGroupName):  # noqa: N803 - the API's own name
+        if logGroupName not in self.groups:
+            raise ResourceNotFoundException(logGroupName)
+        self.groups.remove(logGroupName)
+        self.deleted.append(logGroupName)
+        return {}
 
 
 class FakeIAMClient:
