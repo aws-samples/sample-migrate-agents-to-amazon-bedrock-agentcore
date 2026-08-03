@@ -332,6 +332,21 @@ def _ask_strands(agent, prompt: str) -> str:
     return text
 
 
+def _report_decision(tool_name: str, allowed: bool, text: str) -> None:
+    """Print one gateway policy decision.
+
+    A permitted call returns the tool's own payload, which is a JSON blob the
+    reader does not need in full, so it is cut short. A refusal is the opposite:
+    the text *is* the finding, and the part that says why sits at the end of it.
+    Truncating a denial at a fixed width drops the reason and leaves a reader
+    looking at a refusal with no explanation attached.
+    """
+    if allowed:
+        print(f"\n{tool_name}({DEMO_ORDER_ID}) allowed=True: {text[:120]}")
+    else:
+        print(f"\n{tool_name}({DEMO_ORDER_ID}) allowed=False: {text}")
+
+
 def run_stage2(
     gateway_id: str,
     gateway_url: str,
@@ -387,14 +402,14 @@ def run_stage2(
         {"order_id": DEMO_ORDER_ID},
         region_name,
     )
-    print(f"\nlookup_order({DEMO_ORDER_ID}) allowed={allowed}: {text[:120]}")
+    _report_decision("lookup_order", allowed, text)
     allowed, text = call_tool_through_gateway(
         gateway_url,
         "supportTools___process_return",
         {"order_id": DEMO_ORDER_ID, "reason": "damaged in transit"},
         region_name,
     )
-    print(f"process_return({DEMO_ORDER_ID}) allowed={allowed}: {text[:120]}")
+    _report_decision("process_return", allowed, text)
 
 
 def run(args: argparse.Namespace) -> None:
