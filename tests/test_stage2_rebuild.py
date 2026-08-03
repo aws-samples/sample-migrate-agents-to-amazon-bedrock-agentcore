@@ -53,6 +53,7 @@ from examples.stage2_rebuild.policy import demo_principals
 from examples.stage2_rebuild import strands_agent
 from examples.stage2_rebuild.strands_agent import build_agent
 from examples.tools import gateway_mcp_tools
+from examples.validation.measure_walkthrough import Measurements
 from tests import fake_cedar
 from tests.fake_cedar import Entity
 from tests.fake_control_plane import (
@@ -1384,6 +1385,87 @@ class TeardownTest(unittest.TestCase):
     def test_a_run_that_created_no_roles_does_not_touch_iam(self):
         self.full_teardown()
         self.assertNotIn("demo IAM roles", self.attempted)
+
+
+class MeasurementTableTest(unittest.TestCase):
+    """The table has to say which numbers came from something that worked.
+
+    Untested until a live run printed "CreateAgentRuntime -> READY  43.6s" for a
+    create that raised. The timing recorded from a finally block is right — the
+    number is real and losing it on failure would be worse — but the name is a
+    claim, and nothing marked the row.
+    """
+
+    def table(self, measured) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            measured.report()
+        return out.getvalue()
+
+    def test_a_block_that_raised_is_recorded_and_marked(self):
+        measured = Measurements()
+        with self.assertRaises(ValueError):
+            with measured.timing("CreateAgentRuntime -> READY"):
+                raise ValueError("role validation failed")
+
+        (name, value, unit, note, failed), = measured.taken
+        self.assertEqual(name, "CreateAgentRuntime -> READY")
+        self.assertIsInstance(value, float)
+        self.assertEqual(unit, "s")
+        self.assertTrue(failed)
+        self.assertIn("ValueError", note)
+
+        table = self.table(measured)
+        row, = [line for line in table.splitlines() if "CreateAgentRuntime" in line]
+        self.assertTrue(row.startswith("! "), table)
+        self.assertIn("time to FAIL", row)
+
+    def test_the_exception_is_re_raised_untouched(self):
+        original = ValueError("role validation failed")
+        measured = Measurements()
+        with self.assertRaises(ValueError) as caught:
+            with measured.timing("CreateAgentRuntime -> READY"):
+                raise original
+        self.assertIs(caught.exception, original)
+
+    def test_a_caller_note_survives_beside_the_failure_reason(self):
+        measured = Measurements()
+        with self.assertRaises(RuntimeError):
+            with measured.timing("provisioning", note="from this create"):
+                raise RuntimeError("boom")
+        note = measured.taken[0][3]
+        self.assertIn("RuntimeError", note)
+        self.assertIn("from this create", note)
+
+    def test_a_block_that_returned_is_not_marked(self):
+        measured = Measurements()
+        with measured.timing("CreateAgentRuntime -> READY", note="from this create"):
+            pass
+        self.assertEqual(measured.taken[0][3], "from this create")
+        self.assertFalse(measured.taken[0][4])
+
+        table = self.table(measured)
+        self.assertNotIn("!", table)
+        self.assertNotIn("FAIL", table)
+
+    def test_a_recorded_value_that_is_not_a_timing_is_never_marked(self):
+        measured = Measurements()
+        measured.record("largest blob event round-tripped", 4_194_304, " B")
+        self.assertFalse(measured.taken[0][4])
+        self.assertNotIn("!", self.table(measured))
+
+    def test_keyboardinterrupt_is_marked_rather_than_swallowed(self):
+        """BaseException, not Exception: a run cancelled mid-wait is not a READY.
+
+        A ^C during a 3-minute memory wait is the likeliest way this table ever
+        sees an unfinished block, and it does not inherit from Exception.
+        """
+        measured = Measurements()
+        with self.assertRaises(KeyboardInterrupt):
+            with measured.timing("memory -> ACTIVE"):
+                raise KeyboardInterrupt
+        self.assertTrue(measured.taken[0][4])
+        self.assertIn("KeyboardInterrupt", measured.taken[0][3])
 
 
 def quiet(test):

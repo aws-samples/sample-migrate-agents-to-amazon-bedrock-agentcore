@@ -9,6 +9,10 @@ thing it prints is this table; the values will differ from the ones in the
 article, because they are latencies against a live service, and that is the
 point of measuring them rather than quoting them.
 
+A row prefixed ``!`` is how long something took to *fail*. The table is printed
+even when the run breaks, so those rows are the ones that say where it got to,
+and they are marked because the names read like claims.
+
 Two of them are not timings and are the ones worth reading:
 
 ``memory events`` is how many events the thread holds after each turn. It grows
@@ -51,24 +55,42 @@ class Measurements:
     def __init__(self):
         self.taken = []
 
-    def record(self, name: str, value, unit: str = "", note: str = "") -> None:
-        self.taken.append((name, value, unit, note))
+    def record(
+        self, name: str, value, unit: str = "", note: str = "", failed: bool = False
+    ) -> None:
+        self.taken.append((name, value, unit, note, failed))
 
     @contextmanager
     def timing(self, name: str, note: str = ""):
-        """Time a block and record it in seconds."""
+        """Time a block and record it in seconds, marked if the block raised.
+
+        The elapsed time is recorded either way, because how long something took
+        to fail is worth knowing. What it must not do is record a failure as a
+        measurement of success: these names are claims — "CreateAgentRuntime ->
+        READY" — and a run that raised inside the block printed exactly that
+        claim with a number beside it, which is a measurement table asserting
+        the opposite of what happened.
+        """
         started = time.monotonic()
+        failure = ""
         try:
             yield
+        except BaseException as error:  # recorded, then re-raised untouched
+            failure = type(error).__name__
+            raise
         finally:
-            self.record(name, round(time.monotonic() - started, 1), "s", note)
+            if failure:
+                reason = f"time to FAIL with {failure}, not to reach this state"
+                note = f"{reason}; {note}" if note else reason
+            self.record(name, round(time.monotonic() - started, 1), "s", note, bool(failure))
 
     def report(self) -> None:
         print("\n=== measurements, from this run ===")
         width = max((len(name) for name, *_ in self.taken), default=0)
-        for name, value, unit, note in self.taken:
+        for name, value, unit, note, failed in self.taken:
             suffix = f"  ({note})" if note else ""
-            print(f"  {name:<{width}}  {value}{unit}{suffix}")
+            gutter = "! " if failed else "  "
+            print(f"{gutter}{name:<{width}}  {value}{unit}{suffix}")
 
 
 def count_events(
