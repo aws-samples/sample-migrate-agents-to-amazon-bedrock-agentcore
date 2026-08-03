@@ -35,6 +35,7 @@ import tempfile
 import unittest
 import zipfile
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from unittest import mock
 
 from examples.stage1_replatform import deploy_runtime
@@ -57,6 +58,11 @@ class FakeRuntimeControlClient:
         self.statuses = list(statuses)
         self.calls = []
         self.failure_reason = ""
+        # What the control plane reports about its own timing, which is the fourth
+        # measurement's only source. Real datetimes, because the code subtracts
+        # them and a float would let a wrong subtraction pass.
+        self.created_at = datetime(2026, 8, 2, 12, 0, 0, tzinfo=timezone.utc)
+        self.last_updated_at = datetime(2026, 8, 2, 12, 0, 16, tzinfo=timezone.utc)
 
     def get_paginator(self, name):
         assert name == "list_agent_runtimes", name
@@ -87,6 +93,8 @@ class FakeRuntimeControlClient:
             "agentRuntimeId": rid,
             "agentRuntimeArn": f"arn:aws:bedrock-agentcore:us-east-1:1:runtime/{rid}",
             "status": status,
+            "createdAt": self.created_at,
+            "lastUpdatedAt": self.last_updated_at,
         }
         if self.failure_reason:
             result["failureReason"] = self.failure_reason
@@ -567,6 +575,62 @@ class TeardownContractTest(unittest.TestCase):
         self.assertGreaterEqual(deploy_runtime.SESSION_ID_MIN, 33)
         padded = f"deploy-runtime-x".ljust(deploy_runtime.SESSION_ID_MIN, "0")
         self.assertGreaterEqual(len(padded), 33)
+
+    def test_deleting_a_log_group_that_was_never_written_to_is_not_an_error(self):
+        """A runtime deleted without being invoked leaves no group behind.
+
+        Teardown names the group from the runtime id rather than discovering it, so
+        it will always ask. Asking for one that does not exist has to be ordinary,
+        or every teardown of an uninvoked runtime ends in a failure list.
+        """
+        class Logs:
+            class exceptions:
+                class ResourceNotFoundException(Exception):
+                    pass
+
+            def delete_log_group(self, logGroupName):
+                raise self.exceptions.ResourceNotFoundException(logGroupName)
+
+        with mock.patch.object(deploy_runtime.boto3, "client", lambda *a, **k: Logs()):
+            with redirect_stdout(io.StringIO()) as out:
+                deploy_runtime.delete_log_group("/aws/bedrock-agentcore/runtimes/x")
+        self.assertIn("No log group", out.getvalue())
+
+
+class FourthMeasurementTest(unittest.TestCase):
+    """The create -> lastUpdated delta, which is the one number with two meanings."""
+
+    def setUp(self):
+        self.control = FakeRuntimeControlClient(
+            existing={"MigratedAgentRuntime-abc1234567": {"name": "MigratedAgentRuntime"}}
+        )
+        patcher = mock.patch.object(
+            deploy_runtime.boto3, "client", lambda *a, **k: self.control
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_delta_comes_from_the_services_own_timestamps(self):
+        """Not from a client stopwatch, which is the point of having it."""
+        self.assertEqual(
+            deploy_runtime.provisioning_delta("MigratedAgentRuntime-abc1234567"), 16.0
+        )
+
+    def test_a_zero_delta_is_reported_rather_than_treated_as_missing(self):
+        """createdAt == lastUpdatedAt is a real answer, not an absent one."""
+        self.control.last_updated_at = self.control.created_at
+        self.assertEqual(
+            deploy_runtime.provisioning_delta("MigratedAgentRuntime-abc1234567"), 0.0
+        )
+
+    def test_an_existing_runtime_is_reported_before_the_deploy_changes_the_answer(self):
+        self.assertEqual(
+            deploy_runtime.existing_runtime_id(), "MigratedAgentRuntime-abc1234567"
+        )
+
+    def test_no_runtime_of_ours_reads_as_none_not_as_someone_elses(self):
+        self.control.existing = {"blogTestStrandsAgent-V1": {"name": "blogTestStrandsAgent"}}
+        self.assertIsNone(deploy_runtime.existing_runtime_id())
 
 
 if __name__ == "__main__":

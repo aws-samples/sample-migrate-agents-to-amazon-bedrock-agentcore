@@ -312,6 +312,36 @@ def _find_existing_runtime(control, name: str) -> Optional[str]:
     return None
 
 
+def existing_runtime_id(region_name: str = "us-east-1") -> Optional[str]:
+    """Whether a runtime of ours is already in the account, before deploy runs.
+
+    Asked by the walkthrough so that the createdAt -> lastUpdatedAt delta can be
+    labelled with which of create and update produced it. The two are not the same
+    quantity and reporting one as the other is a wrong number, not a rounding.
+    """
+    control = boto3.client("bedrock-agentcore-control", region_name=region_name)
+    return _find_existing_runtime(control, RUNTIME_NAME)
+
+
+def provisioning_delta(runtime_id: str, region_name: str = "us-east-1") -> float:
+    """The service's own createdAt -> lastUpdatedAt gap, in seconds.
+
+    A second opinion on the time to READY, taken from the control plane's
+    timestamps instead of from a client-side stopwatch, so it does not share the
+    stopwatch's error: polling interval, clock skew and the latency of the calls
+    around it are all in the wall-clock figure and none of them are in this one.
+
+    Only equals provisioning time on a runtime created by the run that reads it.
+    After an UpdateAgentRuntime the gap spans everything since the original
+    create, which is why the caller passes the create-or-update distinction into
+    the note rather than letting the number speak for itself.
+    """
+    runtime = boto3.client(
+        "bedrock-agentcore-control", region_name=region_name
+    ).get_agent_runtime(agentRuntimeId=runtime_id)
+    return (runtime["lastUpdatedAt"] - runtime["createdAt"]).total_seconds()
+
+
 def _fail_on_wrong_architecture(reason: str) -> None:
     """Turn the service's ARM64 rejection into the files that caused it.
 
@@ -469,10 +499,10 @@ def invoke(runtime_arn: str, prompt: str, session_id: str, region_name: str) -> 
 def delete_runtime(runtime_id: str, region_name: str = "us-east-1") -> None:
     """Delete the runtime and wait until GetAgentRuntime says it is gone.
 
-    The CloudWatch log group the service created for it is NOT deleted with it and
-    is not deleted here either: it holds the only record of why a failed
-    invocation failed, which is worth more than an empty log group is worth
-    tidying. teardown prints its name so it is not a surprise.
+    Deleting the runtime does not delete the CloudWatch log group the service
+    created for it, so delete_log_group is a separate step rather than part of
+    this one. The name is printed here as well, because the id it is built from
+    stops being discoverable the moment this call succeeds.
     """
     control = boto3.client("bedrock-agentcore-control", region_name=region_name)
     try:
@@ -495,6 +525,28 @@ def delete_runtime(runtime_id: str, region_name: str = "us-east-1") -> None:
 def log_group_name(runtime_id: str) -> str:
     """Where Runtime writes this runtime's logs, and what survives its deletion."""
     return f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
+
+
+def delete_log_group(name: str, region_name: str = "us-east-1") -> None:
+    """Delete a log group the service created implicitly.
+
+    Nothing in this walkthrough asked for this group: the first write created it,
+    which is exactly why it is easy to leave behind. It is not billed for storage
+    it does not hold, but --teardown claims to put the account back the way it was
+    found, and a resource that no longer appears in any Delete* call's blast radius
+    is how an account accumulates the kind that nobody is auditing.
+
+    Deleted last, after the runtime. In the other order the runtime is still alive
+    and its next log line recreates the group.
+    """
+    logs = boto3.client("logs", region_name=region_name)
+    try:
+        logs.delete_log_group(logGroupName=name)
+        print(f"Deleted log group {name}")
+    except logs.exceptions.ResourceNotFoundException:
+        # Never written to, so never created. A runtime that reached READY and was
+        # then deleted without being invoked leaves no group behind.
+        print(f"No log group {name} to delete")
 
 
 def delete_bucket(bucket: str, region_name: str = "us-east-1") -> None:

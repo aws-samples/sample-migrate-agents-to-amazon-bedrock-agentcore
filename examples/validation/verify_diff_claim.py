@@ -47,6 +47,29 @@ counting them would inflate the glue number several times over on work that
 proves the migration rather than performs it. A reader migrating a real agent
 writes tests either way, before and after. Stated here rather than left implicit
 because it is the single largest exclusion in this script.
+
+DEPLOY TOOLING IS NOT GLUE, and this is the exclusion most open to argument, so
+the number is printed anyway and the reasoning is here to be disagreed with.
+examples/stage1_replatform/deploy_runtime.py is several times the size of both
+glue modules put together. Two things keep it out of the glue count:
+
+  1. The glue test is "no SDK ships it, so the reader writes it." Deployment is
+     shipped. The agentcore CLI deploys an agent to Runtime, and a reader who
+     wants their agent hosted runs that, or clicks through the console, or writes
+     a dozen lines of boto3. Nobody has to write this file. It exists because a
+     walkthrough has requirements a reader does not: reproducible from a checkout
+     with pip and boto3 and nothing else, idempotent across re-runs, able to
+     delete everything it made, and instrumented to time four things. The
+     checkpointer and the MCP adapter are holes in the SDK. Deployment is not a
+     hole; it is a choice of tool.
+
+  2. The glue modules run inside the deployed artifact — the checkpointer *is* the
+     agent's state and the adapter *is* its tools, and removing either stops the
+     agent working. deploy_runtime.py runs on the developer's machine and is never
+     imported by the agent at all. That line is mechanical rather than a matter of
+     taste, so main() checks it instead of asserting it: if the entry point ever
+     imports the deploy module, the check fails and this classification has to be
+     revisited rather than quietly going stale.
 """
 
 import ast
@@ -65,10 +88,15 @@ STAGE0_AGENT = [
     REPO / "examples/stage0_langgraph/tools.py",
 ]
 
-# Glue: written for this migration, shipped by no SDK.
+# Glue: written for this migration, shipped by no SDK, and loaded by the agent.
 STAGE1_GLUE = [
     REPO / "examples/stage1_replatform/agentcore_memory_saver.py",
     REPO / "examples/stage1_replatform/langchain_mcp_tools.py",
+]
+
+# Counted and reported, but in neither number. See DEPLOY TOOLING above.
+DEPLOY_TOOLING = [
+    REPO / "examples/stage1_replatform/deploy_runtime.py",
 ]
 
 # Sample-only plumbing on the stage-0 side. A line is demo plumbing if it is a
@@ -179,12 +207,40 @@ def stage0_imports() -> list:
     return edges
 
 
+def deploy_tooling_is_not_in_the_agent() -> list:
+    """Check the line drawn above: nothing in the artifact imports the deployer.
+
+    The claim that deploy tooling is not glue rests on it not being part of the
+    running agent. That is checkable rather than arguable, so it is checked. Any
+    finding here is a reason to reclassify the file, not a reason to edit this
+    function.
+    """
+    excluded = {path.stem for path in DEPLOY_TOOLING}
+    offenders = []
+    for path in [STAGE1_ENTRY] + STAGE1_GLUE:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            names = []
+            if isinstance(node, ast.ImportFrom):
+                names = [(node.module or "").split(".")[-1]]
+                names += [alias.name for alias in node.names]
+            elif isinstance(node, ast.Import):
+                names = [alias.name.split(".")[-1] for alias in node.names]
+            for name in names:
+                if name in excluded:
+                    offenders.append(f"{path.name}:{node.lineno} imports {name}")
+    return offenders
+
+
 def main() -> None:
     removed, added, dropped = entry_point_diff()
     changed = len(removed) + len(added)
 
     glue = {p: len(code_lines(p)) for p in STAGE1_GLUE}
     glue_total = sum(glue.values())
+
+    tooling = {p: len(code_lines(p)) for p in DEPLOY_TOOLING}
+    tooling_total = sum(tooling.values())
+    offenders = deploy_tooling_is_not_in_the_agent()
 
     imported = {p: len(code_lines(p)) for p in STAGE0_AGENT}
     imported_total = sum(imported.values())
@@ -211,6 +267,21 @@ def main() -> None:
         print(f"  {count:>4}  {path.relative_to(REPO)}")
     print(f"  {glue_total:>4}  total")
     print()
+    print("EXCLUDED FROM BOTH NUMBERS -- deploy tooling, disclosed because it is large")
+    for path, count in tooling.items():
+        print(f"  {count:>4}  {path.relative_to(REPO)}")
+    print(f"  {tooling_total:>4}  total, which would be {glue_total + tooling_total} if counted as glue")
+    print("  Not counted: the agentcore CLI already deploys to Runtime, so no reader")
+    print("  has to write this, and nothing inside the artifact imports it. Move it")
+    print("  into the glue column if you disagree -- the number is right there.")
+    if offenders:
+        print("  CHECK FAILED -- the agent imports the deploy tooling, so the")
+        print("  not-part-of-the-agent argument above does not hold:")
+        for offender in offenders:
+            print(f"    {offender}")
+    else:
+        print("  checked: no file in the deployed artifact imports it.")
+    print()
     print("CONTEXT -- the reader's agent, imported by stage 1 rather than rewritten")
     for path, count in imported.items():
         print(f"  {count:>4}  {path.relative_to(REPO)}")
@@ -225,7 +296,8 @@ def main() -> None:
     print(f"  {glue_total} lines of new supporting code the SDK does not ship.")
     print(f"  {imported_total} lines of graph, router, prompts and tool bodies imported untouched.")
     print()
-    print("METHOD: code lines only, docstrings and comments stripped. Tests excluded.")
+    print("METHOD: code lines only, docstrings and comments stripped. Tests and the")
+    print("deploy tooling are excluded, and both exclusions are counted above.")
     print("Counts are of lines, not statements, and follow this repo's formatting.")
 
 

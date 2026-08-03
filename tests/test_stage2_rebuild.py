@@ -1243,6 +1243,84 @@ class TeardownTest(unittest.TestCase):
 
         self.assertEqual(self.attempted, ["target", "gateway", "memory"])
 
+    def _patch_runtime_deletes(self):
+        """Record the runtime deletes instead of making them."""
+        for name, label in (
+            ("delete_runtime", "runtime"),
+            ("delete_bucket", "artifact bucket"),
+            ("delete_role", "runtime execution role"),
+            ("delete_log_group", "log group"),
+        ):
+            self.replace(
+                run_walkthrough.deploy_runtime, name, self._recorder(label)
+            )
+
+    RUNTIME_KWARGS = {
+        "runtime_id": "MigratedAgentRuntime-abc1234567",
+        "zip_bucket": "migrated-agent-runtime-123456789012",
+        "runtime_role": "MigratedAgentRuntimeRole",
+        "log_groups": ["/aws/bedrock-agentcore/runtimes/MigratedAgentRuntime-abc1234567-DEFAULT"],
+    }
+
+    def test_the_runtime_goes_first_and_its_leftovers_go_last(self):
+        """The runtime holds the zip and assumes the role, so both outlive it.
+
+        The log group is last for the opposite reason: it survives the runtime, and
+        deleting it while the runtime is still alive just means the next log line
+        creates it again.
+        """
+        self._patch_runtime_deletes()
+        self.full_teardown(**self.RUNTIME_KWARGS)
+
+        self.assertEqual(
+            self.attempted,
+            [
+                "runtime", "target", "gateway", "memory", "policies", "policy engine",
+                "artifact bucket", "runtime execution role", "log group",
+            ],
+        )
+
+    def test_a_failing_runtime_delete_does_not_orphan_the_bucket_or_the_log_group(self):
+        """The leak this whole class of resource is prone to, as a test.
+
+        A fail-fast teardown here leaves behind a bucket holding 50 MB, an IAM role
+        that can read it, and a log group nothing will ever look at again.
+        """
+        self._patch_runtime_deletes()
+        self.replace(
+            run_walkthrough.deploy_runtime,
+            "delete_runtime",
+            self._recorder("runtime", error=RuntimeError("still present after 180s")),
+        )
+
+        with self.assertRaises(RuntimeError) as caught:
+            self.full_teardown(**self.RUNTIME_KWARGS)
+
+        for label in ("artifact bucket", "runtime execution role", "log group"):
+            self.assertIn(label, self.attempted)
+        self.assertIn("runtime", str(caught.exception))
+
+    def test_every_discovered_log_group_is_deleted_not_just_the_first(self):
+        """Discovery matches on a prefix, so it can return more than one.
+
+        Two runs that both left a group behind is exactly the state the account was
+        found in, and a teardown that deletes one of them reports success.
+        """
+        self._patch_runtime_deletes()
+        groups = [
+            "/aws/bedrock-agentcore/runtimes/MigratedAgentRuntime-aaaaaaaaaa-DEFAULT",
+            "/aws/bedrock-agentcore/runtimes/MigratedAgentRuntime-bbbbbbbbbb-DEFAULT",
+        ]
+        deleted = []
+        self.replace(
+            run_walkthrough.deploy_runtime,
+            "delete_log_group",
+            lambda name, region: deleted.append(name),
+        )
+        self.full_teardown(**{**self.RUNTIME_KWARGS, "log_groups": groups})
+
+        self.assertEqual(deleted, groups)
+
     def test_the_gateway_delete_is_retried_and_then_confirmed_gone(self):
         # Measured live: DeleteGateway raised ValidationException while
         # ListGatewayTargets already returned [].

@@ -20,9 +20,14 @@ examples/stage1_replatform/agentcore_memory_saver.py.
 from AgentCore Memory *before* invoking anything. It is the cross-instance claim
 reduced to an integer: nothing in the process held those messages.
 
-What this module deliberately does not measure is recorded in
-NOT_MEASURED_HERE, with the reason. A missing number with a reason is worth more
-than a number produced by something other than the flow being described.
+This module used to carry a NOT_MEASURED_HERE table: four Runtime numbers the
+article printed that the walkthrough could not produce, each with the reason. The
+reason was the same one four times over — they need a deployed runtime, and
+deploying one meant a container build, a registry and an ARM64 builder, which is a
+different article. CreateAgentRuntime's ``codeConfiguration`` needs none of those.
+It takes a zip in S3, pip builds it, and the walkthrough now deploys and invokes
+the agent, so all four are measured here and the table is gone rather than
+maintained. See examples/stage1_replatform/deploy_runtime.py.
 """
 
 import time
@@ -39,29 +44,6 @@ from examples.stage1_replatform.agentcore_memory_saver import MAX_EVENTS
 # reading and also the useful one, because a checkpoint this large is a bad idea
 # under any ceiling — the whole blob is rewritten every superstep.
 PAYLOAD_LADDER = (10_240, 102_400, 512_000, 1_048_576, 4_194_304)
-
-# Numbers the article prints that this walkthrough cannot produce, and why. All
-# four need an AgentCore Runtime, and the walkthrough deliberately creates none:
-# it is about the migration, and a container deploy is a different article.
-NOT_MEASURED_HERE = {
-    "runtime CreateAgentRuntime -> READY": (
-        "needs a Runtime. Build the image, push it, CreateAgentRuntime, and time "
-        "GetAgentRuntime until READY. Worth knowing before you rely on it: READY "
-        "is a control-plane record and is not health-gated, so it says nothing "
-        "about whether the image runs."
-    ),
-    "runtime first invocation, cold": (
-        "needs a Runtime. This is where the image pull and container start "
-        "actually happen, which is why it dwarfs the time to READY."
-    ),
-    "runtime second invocation, warm": "needs a Runtime, invoked twice.",
-    "an existing runtime's create -> lastUpdated delta": (
-        "needs a Runtime that already exists. It corroborates the READY figure "
-        "from a second, independently created resource, so it cannot come from "
-        "the same run that produced the first."
-    ),
-}
-
 
 class Measurements:
     """Collect named measurements in the order they are taken, then print them."""
@@ -87,9 +69,6 @@ class Measurements:
         for name, value, unit, note in self.taken:
             suffix = f"  ({note})" if note else ""
             print(f"  {name:<{width}}  {value}{unit}{suffix}")
-        print("\n=== not measurable from this walkthrough ===")
-        for name, reason in NOT_MEASURED_HERE.items():
-            print(f"  {name}\n      {reason}")
 
 
 def count_events(

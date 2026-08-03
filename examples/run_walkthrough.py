@@ -13,17 +13,24 @@ its conversation state lives in an in-process checkpointer that dies with the
 process.
 
 Stage 1 keeps that graph and replaces what surrounds it. It creates the gateway,
-registers the Lambda target on it, creates the memory resource, then builds the
-same compiled graph with the Gateway's tools and the AgentCore Memory
-checkpointer:
+registers the Lambda target on it, creates the memory resource, builds the same
+compiled graph with the Gateway's tools and the AgentCore Memory checkpointer, and
+then deploys that same agent onto AgentCore Runtime:
 
     create gateway -> register target -> create memory
         -> build graph with Gateway tools + AgentCore Memory -> invoke twice
+        -> zip the agent, deploy it to Runtime, invoke it twice more
 
 The gateway id and URL flow into target registration and the MCP client, the
 memory id flows into the checkpointer, and one thread id is reused across two
 separately constructed graphs so that the second invocation resumes state no
 object in this process was holding.
+
+The Runtime deploy is part of stage 1 rather than a stage of its own because stage
+1 *is* "the same agent, somewhere else", and running it on this machine only ever
+half-demonstrated that. It needs no container: the artifact is a zip in S3 built
+by pip, so the prerequisites are the ones the rest of the walkthrough already has.
+See examples/stage1_replatform/deploy_runtime.py.
 
 Stage 2 rebuilds the agent on the Strands Agents SDK and hardens it. The graph and
 its hand-written router are gone, replaced by a model-driven loop over the same
@@ -39,11 +46,17 @@ Stage 2 reuses the gateway, target and memory stage 1 creates, so it needs the
 same two ARNs. It has its own entry point at
 examples/stage2_rebuild/strands_agent.py for deploying it to Runtime.
 
-Pass --teardown to delete what ran: the gateway target, the gateway, the memory,
-the Cedar policies, their engine and the two demo roles. Every step is attempted
+Pass --teardown to delete what ran: the agent runtime, the gateway target, the
+gateway, the memory, the Cedar policies, their engine, the two demo roles, and the
+runtime's artifact bucket, execution role and log group. Every step is attempted
 even if an earlier one failed, because a delete that skips the rest of the list is
 how resources get orphaned. The Lambda and the two roles it needs come from
 examples/gateway/lambda_target/deploy.sh and are not deleted here.
+
+The log group is on that list because nothing put it there deliberately. Runtime
+creates it on the first log line and DeleteAgentRuntime does not remove it, so it
+is the one resource here that outlives everything that referenced it — and the one
+a teardown can leave behind while still reporting success.
 
 --teardown with no --stage is the recovery path, and it is the one to reach for
 when a run has already died:
@@ -51,9 +64,10 @@ when a run has already died:
     python -m examples.run_walkthrough --teardown --dry-run
     python -m examples.run_walkthrough --teardown
 
-It finds the gateway, target, memory, policy engine, policies and demo roles by
-the names this walkthrough gives them and deletes those, so it works from a
-different process than the one that created them. It needs neither ARN.
+It finds the gateway, target, memory, policy engine, policies, demo roles, agent
+runtime, artifact bucket, runtime role and runtime log groups by the names this
+walkthrough gives them and deletes those, so it works from a different process
+than the one that created them. It needs neither ARN.
 """
 
 import argparse
@@ -64,6 +78,7 @@ from contextlib import contextmanager
 from typing import Sequence
 
 import boto3
+import botocore.exceptions
 from bedrock_agentcore.memory import MemoryClient
 from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage
@@ -79,6 +94,7 @@ from examples.memory.configure_memory import (
 from examples.stage0_langgraph.agent import build_graph
 from examples.stage0_langgraph.local_api import running_stub
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
+from examples.stage1_replatform import deploy_runtime
 from examples.stage1_replatform.agentcore_memory_saver import AgentCoreMemorySaver
 from examples.stage1_replatform.langchain_mcp_tools import merge_tools, to_langchain_tools
 from examples.stage2_rebuild.policy.attach_policy import (
@@ -199,14 +215,25 @@ def teardown(
     policy_engine_id: str = "",
     policy_ids: Sequence[str] = (),
     demo_roles: bool = False,
+    runtime_id: str = "",
+    zip_bucket: str = "",
+    runtime_role: str = "",
+    log_groups: Sequence[str] = (),
 ) -> None:
     """Delete everything the walkthrough created, in dependency order.
 
-    Target, then gateway, then memory, then the Cedar policies, their engine, and
-    last the two demo IAM roles. The first two are ordered by the service — a
-    gateway with a target attached will not delete — and the engine goes after the
-    gateway that referenced it. IAM has no such ordering; the roles go last only
-    so that a failure to delete a role cannot leave a billable resource behind it.
+    The runtime goes first, then target, gateway, memory, the Cedar policies, their
+    engine, the two demo roles, and last the runtime's artifact bucket, its
+    execution role and its log group. Some of that order is the service's — a
+    gateway with a target attached will not delete, and the engine goes after the
+    gateway that referenced it — and the rest is dependency: the runtime holds a
+    reference to the zip and assumes the role, so both outlive it by one step.
+
+    The log group is deleted last and is the one resource here nothing asked for.
+    The service creates it on the runtime's first log line, and neither
+    DeleteAgentRuntime nor DeleteFunction removes it, so it is the class a teardown
+    is most likely to be silently blind to. Deleting it before the runtime would
+    not work either: the runtime's next log line recreates it.
 
     Every step is attempted even when an earlier one raises, and the failures are
     collected and re-raised together at the end. A teardown that stops at its first
@@ -215,6 +242,10 @@ def teardown(
     """
     control = boto3.client("bedrock-agentcore-control", region_name=region_name)
     steps = []
+    if runtime_id:
+        steps.append(
+            ("runtime", lambda: deploy_runtime.delete_runtime(runtime_id, region_name))
+        )
     if target_id:
         steps.append(("target", lambda: _delete_target(control, gateway_id, target_id)))
     if gateway_id:
@@ -237,6 +268,21 @@ def teardown(
         )
     if demo_roles:
         steps.append(("demo IAM roles", lambda: delete_demo_roles(region_name)))
+    if zip_bucket:
+        steps.append(
+            ("artifact bucket", lambda: deploy_runtime.delete_bucket(zip_bucket, region_name))
+        )
+    if runtime_role:
+        steps.append(
+            ("runtime execution role", lambda: deploy_runtime.delete_role(region_name))
+        )
+    for name in log_groups:
+        steps.append(
+            (
+                f"log group {name}",
+                lambda n=name: deploy_runtime.delete_log_group(n, region_name),
+            )
+        )
 
     failures = []
     for label, delete in steps:
@@ -313,8 +359,14 @@ def run_stage1(
     session_id: str,
     region_name: str,
     measured: Measurements = None,
+    created: dict = None,
 ) -> None:
-    """Stage 1: Gateway tools and AgentCore Memory behind the same graph."""
+    """Stage 1: Gateway tools and AgentCore Memory behind the same graph.
+
+    Then the same agent on Runtime. ``created`` is filled in as each resource comes
+    up, for the same reason stage 2 takes it: a runtime created and then lost to an
+    exception in the invoke below is a billable resource nobody knows to look for.
+    """
     print("\n=== stage 1: Gateway tools + AgentCore Memory ===")
     # search_faq never moves to Gateway, so the local backend is still needed.
     with running_stub() as base_url:
@@ -378,6 +430,79 @@ def run_stage1(
             )
         finally:
             mcp_client.stop(None, None, None)
+
+    # Outside the stub: the deployed agent reaches its tools through the Gateway,
+    # so nothing it needs is listening on this machine. That is the point of the
+    # step -- if the local stub were still load-bearing here, the agent would not
+    # actually be running anywhere else.
+    deploy_to_runtime(gateway_url, memory_id, actor_id, region_name, measured, created)
+
+
+def deploy_to_runtime(
+    gateway_url: str,
+    memory_id: str,
+    actor_id: str,
+    region_name: str,
+    measured: Measurements = None,
+    created: dict = None,
+) -> None:
+    """Deploy the stage-1 entry point to Runtime and invoke it twice.
+
+    The four numbers this produces are the ones the walkthrough used to decline to
+    measure. Nothing was wrong with the reasoning -- the container path really does
+    need a registry and an ARM64 builder, which is a different article -- but the
+    zip path needs neither, so the reason no longer applies.
+
+    Invoked twice on one runtimeSessionId, because cold and warm differ by whether
+    a microVM is already running and the session id is what routes to it. The id is
+    padded: InvokeAgentRuntime rejects anything shorter than 33 characters, and it
+    rejects it as a validation error on the session rather than as a length problem.
+    """
+    print("\n=== stage 1 on AgentCore Runtime: the same agent, deployed ===")
+    # Asked before the deploy, because afterwards the answer is always yes and the
+    # createdAt -> lastUpdatedAt delta means something different on each branch.
+    was_already_there = deploy_runtime.existing_runtime_id(region_name) is not None
+
+    with _optional_timing(measured, "runtime CreateAgentRuntime -> READY"):
+        runtime_id, runtime_arn, _ = deploy_runtime.deploy(
+            gateway_url, memory_id, actor_id, region_name
+        )
+    if created is not None:
+        created["runtime_id"] = runtime_id
+        created["zip_bucket"] = deploy_runtime.bucket_name(
+            boto3.client("sts", region_name=region_name).get_caller_identity()["Account"]
+        )
+        created["runtime_role"] = deploy_runtime.ROLE_NAME
+        # Recorded before the first invocation, which is what creates it. The name
+        # is derivable from the id and the id stops being discoverable once the
+        # runtime is deleted, so teardown cannot work this out for itself later.
+        created["log_groups"] = [deploy_runtime.log_group_name(runtime_id)]
+
+    runtime_session = f"walkthrough-runtime-{runtime_id}".ljust(
+        deploy_runtime.SESSION_ID_MIN, "0"
+    )
+    prompts = (
+        ("runtime first invocation, cold", "Hi, I'm Dana and my order number is 12345."),
+        ("runtime second invocation, warm", "Has it shipped yet, and who is carrying it?"),
+    )
+    for name, prompt in prompts:
+        print(f"\ncustomer: {prompt}")
+        body, seconds = deploy_runtime.invoke(
+            runtime_arn, prompt, runtime_session, region_name
+        )
+        print(f"  agent ({seconds:.1f}s): {body[:300]}")
+        if measured is not None:
+            measured.record(name, round(seconds, 1), "s")
+
+    if measured is not None:
+        # The service's own view of how long it took, which is worth having beside
+        # the stopwatch above precisely because it is not the same clock.
+        measured.record(
+            "an existing runtime's create -> lastUpdated delta",
+            round(deploy_runtime.provisioning_delta(runtime_id, region_name), 1),
+            "s",
+            "spans this update, not a create" if was_already_there else "from this create",
+        )
 
 
 def _agent_text(message: dict) -> str:
@@ -617,6 +742,12 @@ def discover_resources(
                     ]
                 found["policy_ids"] = policy_ids
 
+    # The runtime's own name is exact; the id carries a service-assigned suffix.
+    for page in control.get_paginator("list_agent_runtimes").paginate():
+        for summary in page.get("agentRuntimes", []):
+            if summary.get("agentRuntimeName") == deploy_runtime.RUNTIME_NAME:
+                found["runtime_id"] = summary["agentRuntimeId"]
+
     # The two Cedar principals are IAM roles, so they are not free of consequence
     # if left behind: a role that can call a deleted gateway is a permission
     # nobody is auditing. Recovery has to find them too, or the flag that claims
@@ -628,6 +759,38 @@ def discover_resources(
             found["demo_roles"] = True
         except iam.exceptions.NoSuchEntityException:
             pass
+    try:
+        iam.get_role(RoleName=deploy_runtime.ROLE_NAME)
+        found["runtime_role"] = deploy_runtime.ROLE_NAME
+    except iam.exceptions.NoSuchEntityException:
+        pass
+
+    account_id = boto3.client("sts", region_name=region_name).get_caller_identity()[
+        "Account"
+    ]
+    bucket = deploy_runtime.bucket_name(account_id)
+    try:
+        boto3.client("s3", region_name=region_name).head_bucket(Bucket=bucket)
+        found["zip_bucket"] = bucket
+    except botocore.exceptions.ClientError as error:
+        # 404 is absent, 403 is present and owned by somebody else. Neither is
+        # ours to delete, and telling them apart matters only in that the second
+        # would mean the deploy could never have worked.
+        if error.response["Error"]["Code"] not in ("404", "403", "NoSuchBucket"):
+            raise
+
+    # Found by prefix and independently of the runtime, which is the whole point:
+    # this is the one class that survives the resource that created it, so a
+    # discovery that derived the name from a live runtime id would find nothing in
+    # exactly the case where something has been left behind.
+    logs = boto3.client("logs", region_name=region_name)
+    groups = []
+    for page in logs.get_paginator("describe_log_groups").paginate(
+        logGroupNamePrefix=f"/aws/bedrock-agentcore/runtimes/{deploy_runtime.RUNTIME_NAME}-"
+    ):
+        groups += [group["logGroupName"] for group in page.get("logGroups", [])]
+    if groups:
+        found["log_groups"] = sorted(groups)
     return found
 
 
@@ -638,6 +801,9 @@ def _print_ledger(found: dict) -> bool:
         ("target_id", "gateway target"),
         ("memory_id", "memory"),
         ("policy_engine_id", "policy engine"),
+        ("runtime_id", "agent runtime"),
+        ("zip_bucket", "artifact bucket"),
+        ("runtime_role", "runtime execution role"),
     )
     anything = False
     for key, label in labels:
@@ -649,6 +815,9 @@ def _print_ledger(found: dict) -> bool:
         anything = True
     if found.get("demo_roles"):
         print(f"  IAM roles: {READ_ONLY_ROLE_NAME}, {SUPPORT_ROLE_NAME}")
+        anything = True
+    for name in found.get("log_groups", ()):
+        print(f"  log group: {name}")
         anything = True
     if not anything:
         print("  nothing found")
@@ -705,6 +874,7 @@ def run(args: argparse.Namespace) -> None:
                 session_id,
                 region,
                 measured,
+                created,
             )
         if "2" in stages:
             run_stage2(
@@ -747,6 +917,10 @@ def run(args: argparse.Namespace) -> None:
                 policy_engine_id=created.get("policy_engine_id", ""),
                 policy_ids=created.get("policy_ids", ()),
                 demo_roles=created.get("demo_roles", False),
+                runtime_id=created.get("runtime_id", ""),
+                zip_bucket=created.get("zip_bucket", ""),
+                runtime_role=created.get("runtime_role", ""),
+                log_groups=created.get("log_groups", ()),
             )
 
 
@@ -768,6 +942,10 @@ def run_teardown_only(args: argparse.Namespace) -> None:
         policy_engine_id=found.get("policy_engine_id", ""),
         policy_ids=found.get("policy_ids", ()),
         demo_roles=found.get("demo_roles", False),
+        runtime_id=found.get("runtime_id", ""),
+        zip_bucket=found.get("zip_bucket", ""),
+        runtime_role=found.get("runtime_role", ""),
+        log_groups=found.get("log_groups", ()),
     )
 
 
@@ -820,9 +998,10 @@ def main() -> None:
         "--teardown",
         action="store_true",
         help=(
-            "Delete the gateway target, gateway, memory and Cedar policies after "
-            "running. On its own, with no --stage, it deletes what an earlier run "
-            "left in the account instead of running anything."
+            "Delete the runtime, gateway target, gateway, memory, Cedar policies, "
+            "artifact bucket, runtime role and runtime log group after running. On "
+            "its own, with no --stage, it deletes what an earlier run left in the "
+            "account instead of running anything."
         ),
     )
     parser.add_argument(
