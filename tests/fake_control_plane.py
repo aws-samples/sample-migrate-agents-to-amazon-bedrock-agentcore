@@ -17,6 +17,9 @@ walkthrough rather than the happy path:
 3. DeleteGateway raised ValidationException while ListGatewayTargets already
    returned []. ``validation_failures`` reproduces that: the first N deletes
    raise ValidationException whatever the target list says.
+4. Target names are unique per gateway. CreateGatewayTarget raises
+   ConflictException on a name that is already taken, which is what a second
+   walkthrough run against a surviving gateway actually hits.
 
 FakeClock replaces the module-level ``time`` in the code under test, so waiter
 loops finish instantly and a timeout is reachable without waiting for one.
@@ -52,11 +55,16 @@ class ValidationException(Exception):
     pass
 
 
+class ConflictException(Exception):
+    pass
+
+
 class _Exceptions:
     """The client.exceptions namespace botocore generates per service."""
 
     ResourceNotFoundException = ResourceNotFoundException
     ValidationException = ValidationException
+    ConflictException = ConflictException
 
 
 class _Paginator:
@@ -99,7 +107,12 @@ class FakeAgentCoreControlClient:
         }
         self.engines = {}
         self.policies = {}
-        self.targets = {"tgt-abc123": {"gatewayId": self.gateway["gatewayId"]}}
+        self.targets = {
+            "tgt-abc123": {
+                "gatewayId": self.gateway["gatewayId"],
+                "name": "supportTools",
+            }
+        }
         self.active_after = active_after
         self.delete_lag = delete_lag
         self.validation_failures = validation_failures
@@ -145,6 +158,30 @@ class FakeAgentCoreControlClient:
         self.gateway_deleted = True
         self._delete_gets["gateway"] = self.delete_lag
         return {}
+
+    def create_gateway_target(self, **kwargs):
+        self.calls.append(("create_gateway_target", kwargs))
+        for target_id, target in self.targets.items():
+            if target_id in self.deleted:
+                continue
+            if target.get("name") == kwargs["name"]:
+                raise ConflictException(
+                    f"A target with name '{kwargs['name']}' already exists in this gateway"
+                )
+        target_id = self._make_id("tgt")
+        self.targets[target_id] = {
+            "gatewayId": kwargs["gatewayIdentifier"],
+            **kwargs,
+        }
+        return {"targetId": target_id}
+
+    def update_gateway_target(self, **kwargs):
+        self.calls.append(("update_gateway_target", kwargs))
+        target_id = kwargs["targetId"]
+        if target_id in self.deleted or target_id not in self.targets:
+            raise ResourceNotFoundException(f"{target_id} not found")
+        self.targets[target_id] = {**self.targets[target_id], **kwargs}
+        return {"targetId": target_id}
 
     def get_gateway_target(self, **kwargs):
         self.calls.append(("get_gateway_target", kwargs))
@@ -200,9 +237,18 @@ class FakeAgentCoreControlClient:
         return {"policyEngineId": engine_id, "status": status, **self.engines[engine_id]}
 
     def get_paginator(self, name):
+        if name == "list_gateway_targets":
+            return _Paginator("items", self._target_summaries)
         if name != "list_policy_engines":
             raise ValueError(f"Unfaked paginator: {name}")
         return _Paginator("policyEngines", self._engine_summaries)
+
+    def _target_summaries(self):
+        return [
+            {"targetId": target_id, "name": target.get("name")}
+            for target_id, target in self.targets.items()
+            if target_id not in self.deleted
+        ]
 
     def _engine_summaries(self):
         return [

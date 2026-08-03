@@ -37,6 +37,7 @@ from botocore.validate import ParamValidator
 from strands.tools.mcp.mcp_agent_tool import MCPAgentTool
 
 from examples import run_walkthrough
+from examples.gateway import register_target
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
 from examples.stage2_rebuild.policy import attach_policy
 from examples.stage2_rebuild.policy.attach_policy import (
@@ -1385,6 +1386,86 @@ class TeardownTest(unittest.TestCase):
     def test_a_run_that_created_no_roles_does_not_touch_iam(self):
         self.full_teardown()
         self.assertNotIn("demo IAM roles", self.attempted)
+
+
+class TargetRegistrationTest(unittest.TestCase):
+    """Registering the target twice, which is what a second walkthrough run does.
+
+    create_gateway.py reuses a gateway of the same name, so run 2 gets past the
+    gateway and straight into CreateGatewayTarget, where the name is already
+    taken. Live run 1 died exactly there.
+    """
+
+    def setUp(self):
+        quiet(self)
+        self.control = FakeAgentCoreControlClient()
+        # An empty gateway, so the first register in each test is a create.
+        self.control.targets = {}
+        patch_boto3(self, register_target, **{"bedrock-agentcore-control": self.control})
+
+    def register(self):
+        return register_target.register_target(
+            "gw-abc123",
+            "arn:aws:lambda:us-east-1:123456789012:function:agentcore-support-tools",
+        )
+
+    def operations(self):
+        return [name for name, _ in self.control.calls]
+
+    def test_the_first_run_creates(self):
+        target_id = self.register()
+        self.assertIn("create_gateway_target", self.operations())
+        self.assertEqual(self.control.targets[target_id]["name"], "supportTools")
+
+    def test_a_second_run_updates_instead_of_conflicting(self):
+        first = self.register()
+        self.control.calls.clear()
+
+        second = self.register()
+
+        self.assertEqual(second, first, "the same target, not a second one")
+        self.assertEqual(self.operations().count("update_gateway_target"), 1)
+        self.assertNotIn("create_gateway_target", self.operations())
+        self.assertEqual(len(self.control.targets), 1)
+
+    def test_the_update_carries_the_whole_definition(self):
+        """Not a no-op update: the tool schema is what the gateway publishes.
+
+        A target left from an older run decides which tools the rest of the
+        walkthrough sees, so the update has to overwrite the configuration
+        rather than just prove the target exists.
+        """
+        self.register()
+        self.control.calls.clear()
+        self.register()
+
+        sent = dict(self.control.calls[-1][1])
+        self.assertTrue(
+            valid_request("bedrock-agentcore-control", "UpdateGatewayTarget", sent)
+        )
+        published = sent["targetConfiguration"]["mcp"]["lambda"]
+        self.assertEqual(
+            [tool["name"] for tool in published["toolSchema"]["inlinePayload"]],
+            ["lookup_order", "process_return"],
+        )
+        self.assertEqual(
+            sent["credentialProviderConfigurations"],
+            [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+        )
+
+    def test_a_target_of_another_name_is_left_alone(self):
+        self.control.targets = {"tgt-someone-else": {"gatewayId": "gw-abc123", "name": "other"}}
+        target_id = self.register()
+        self.assertIn("create_gateway_target", self.operations())
+        self.assertIn("tgt-someone-else", self.control.targets)
+        self.assertNotEqual(target_id, "tgt-someone-else")
+
+    def test_the_create_request_shape_is_valid(self):
+        self.register()
+        sent = dict(self.control.calls[-1][1])
+        self.assertTrue(
+            valid_request("bedrock-agentcore-control", "CreateGatewayTarget", sent)
+        )
 
 
 class MeasurementTableTest(unittest.TestCase):
