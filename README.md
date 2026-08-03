@@ -19,6 +19,8 @@ diff against the same starting point rather than a separate demo:
 - **Stage 1 — replatform** (`examples/stage1_replatform/`): keep the agent, replace what surrounds
   it. Graph, router, prompts and tool bodies are imported unchanged; Runtime hosts the process,
   Gateway fronts two of the three tools, AgentCore Memory holds the conversation state.
+  `deploy_runtime.py` is what puts it there — a zip in Amazon S3, with pip as the only build tool.
+  See [Deploying to Runtime](#deploying-to-runtime).
 - **Stage 2 — rebuild** (`examples/stage2_rebuild/`): the same agent on the
   [Strands Agents SDK](https://github.com/strands-agents/harness-sdk), trading the router for a
   model-driven loop, with Cedar rules in Policy in AgentCore over the gateway's tool calls.
@@ -30,7 +32,7 @@ from the files on disk rather than asserting it, so the post's numbers can be re
 ## Repository structure
 
 ```
-Dockerfile                          # ARM64 image for Runtime; the stage is a build argument
+Dockerfile                          # Optional ARM64 image; the zip deploy is the path used here
 requirements.txt                    # Six entries; langchain-aws is pinned, the rest are floors
 setup.sh                            # Create .venv, install requirements, check credentials
 examples/
@@ -45,6 +47,7 @@ examples/
 ├── stage1_replatform/
 │   ├── agent_runtime.py            # Stage-1 entry point for AgentCore Runtime
 │   ├── agentcore_memory_saver.py   # LangGraph checkpointer over AgentCore Memory
+│   ├── deploy_runtime.py           # Package the agent as a zip and deploy it to Runtime
 │   └── langchain_mcp_tools.py      # Gateway MCP tools as LangChain tools
 ├── stage2_rebuild/
 │   ├── strands_agent.py            # Stage-2 entry point, its tools, and build_agent()
@@ -73,7 +76,7 @@ docs/
 tests/                              # Offline suite; fakes for Bedrock, MCP, Memory and Cedar
 
 .github/workflows/
-└── deploy-agent.yml                # CI/CD pipeline for ARM64 builds and AgentCore deployment (manual trigger)
+└── deploy-agent.yml                # CI/CD pipeline for the zip deploy to Runtime (manual trigger)
 ```
 
 ## Prerequisites
@@ -185,10 +188,40 @@ an environment variable — `create_gateway.py` and `register_target.py` read `G
 `gateway_mcp_tools.py` and `stage1_replatform/agent_runtime.py` read `GATEWAY_URL`, and both
 Runtime entry points read `AGENTCORE_MEMORY_ID`.
 
+## Deploying to Runtime
+
+`CreateAgentRuntime` takes the agent two ways. `containerConfiguration` wants a `linux/arm64` image
+in Amazon ECR, which is what the `Dockerfile` is for. `codeConfiguration` wants a zip in Amazon S3,
+and that is what this repository uses, because the only build tool it needs is pip:
+
+```bash
+python -m examples.stage1_replatform.deploy_runtime \
+  --gateway-url https://<gateway-id>.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp \
+  --memory-id MigratedAgentMemory-xxxx
+```
+
+`agent_runtime.py` is deployed unmodified; the gateway URL and memory id reach it as Runtime
+environment variables. `--stage 1` of the walkthrough runs this for you.
+
+Two things about the zip are not obvious, and each costs a failed deploy to learn:
+
+- **Cross-compile the dependencies.** Runtime is ARM64, so a plain `pip install --target` on macOS
+  or an x86 machine produces the wrong binaries and the deploy fails with a message about
+  incompatible binary files that names none of them. Install with
+  `--platform manylinux2014_aarch64 --only-binary=:all:` — a pip flag, not a container.
+- **A `requirements.txt` inside the zip is inert.** Nothing installs it; the dependencies have to be
+  vendored into the archive. **The error message for getting this wrong points away from the
+  cause:** a missing module surfaces as `Runtime initialization time exceeded ... initialization
+  completes in 30s`, a timeout message for an `ImportError`, with the real reason visible only in
+  CloudWatch. Vendor the dependency; do not tune the timeout.
+
+`deploy_runtime.py` does both of these, and its error paths name the cause and the fix rather than
+repeating the service's message.
+
 ## Additional resources
 
 - [Security architecture comparison](docs/security-comparison.md): what self-hosting owns versus what AgentCore owns, and the difference between a sentence in the system prompt, a Bedrock Guardrail, and Cedar rules in Policy in AgentCore.
-- [CI/CD deployment workflow](.github/workflows/deploy-agent.yml): Sample GitHub Actions pipeline for building ARM64 containers and deploying to AgentCore Runtime. Uses `workflow_dispatch` (manual trigger only).
+- [CI/CD deployment workflow](.github/workflows/deploy-agent.yml): Sample GitHub Actions pipeline that runs the zip deploy described above — no container build and no Node.js on the runner. Uses `workflow_dispatch` (manual trigger only).
 
 ## Clean up
 
