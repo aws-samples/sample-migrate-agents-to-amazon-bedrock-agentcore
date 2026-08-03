@@ -1,0 +1,168 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+"""The numbers this article prints, measured by the run that prints them.
+
+Every figure quoted about AgentCore's behaviour here is taken while the
+walkthrough runs, not typed in from a notebook. Run the walkthrough and the last
+thing it prints is this table; the values will differ from the ones in the
+article, because they are latencies against a live service, and that is the
+point of measuring them rather than quoting them.
+
+Two of them are not timings and are the ones worth reading:
+
+``memory events`` is how many events the thread holds after each turn. It grows
+by one per superstep and there is no trim primitive, so this number is the read
+cost of the next turn — see the MAX_EVENTS note in
+examples/stage1_replatform/agentcore_memory_saver.py.
+
+``messages rehydrated`` is how many messages a freshly built graph recovered
+from AgentCore Memory *before* invoking anything. It is the cross-instance claim
+reduced to an integer: nothing in the process held those messages.
+
+What this module deliberately does not measure is recorded in
+NOT_MEASURED_HERE, with the reason. A missing number with a reason is worth more
+than a number produced by something other than the flow being described.
+"""
+
+import time
+from contextlib import contextmanager
+
+from bedrock_agentcore.memory import MemoryClient
+
+from examples.stage1_replatform.agentcore_memory_saver import MAX_EVENTS
+
+# Sizes the payload probe writes, in bytes. The largest is 4 MiB. The ladder
+# stops there rather than binary-searching for a ceiling, so what it establishes
+# is a floor: blob events of at least this size round-trip intact. Treat it as
+# the largest size measured and not as a supported limit, which is the honest
+# reading and also the useful one, because a checkpoint this large is a bad idea
+# under any ceiling — the whole blob is rewritten every superstep.
+PAYLOAD_LADDER = (10_240, 102_400, 512_000, 1_048_576, 4_194_304)
+
+# Numbers the article prints that this walkthrough cannot produce, and why. All
+# four need an AgentCore Runtime, and the walkthrough deliberately creates none:
+# it is about the migration, and a container deploy is a different article.
+NOT_MEASURED_HERE = {
+    "runtime CreateAgentRuntime -> READY": (
+        "needs a Runtime. Build the image, push it, CreateAgentRuntime, and time "
+        "GetAgentRuntime until READY. Worth knowing before you rely on it: READY "
+        "is a control-plane record and is not health-gated, so it says nothing "
+        "about whether the image runs."
+    ),
+    "runtime first invocation, cold": (
+        "needs a Runtime. This is where the image pull and container start "
+        "actually happen, which is why it dwarfs the time to READY."
+    ),
+    "runtime second invocation, warm": "needs a Runtime, invoked twice.",
+    "an existing runtime's create -> lastUpdated delta": (
+        "needs a Runtime that already exists. It corroborates the READY figure "
+        "from a second, independently created resource, so it cannot come from "
+        "the same run that produced the first."
+    ),
+}
+
+
+class Measurements:
+    """Collect named measurements in the order they are taken, then print them."""
+
+    def __init__(self):
+        self.taken = []
+
+    def record(self, name: str, value, unit: str = "", note: str = "") -> None:
+        self.taken.append((name, value, unit, note))
+
+    @contextmanager
+    def timing(self, name: str, note: str = ""):
+        """Time a block and record it in seconds."""
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.record(name, round(time.monotonic() - started, 1), "s", note)
+
+    def report(self) -> None:
+        print("\n=== measurements, from this run ===")
+        width = max((len(name) for name, *_ in self.taken), default=0)
+        for name, value, unit, note in self.taken:
+            suffix = f"  ({note})" if note else ""
+            print(f"  {name:<{width}}  {value}{unit}{suffix}")
+        print("\n=== not measurable from this walkthrough ===")
+        for name, reason in NOT_MEASURED_HERE.items():
+            print(f"  {name}\n      {reason}")
+
+
+def count_events(
+    memory_id: str, actor_id: str, session_id: str, region_name: str
+) -> int:
+    """How many events the thread holds right now.
+
+    This is the quantity the saver's read cost is a function of, so counting it
+    is not bookkeeping: one get_tuple costs ceil(min(N, MAX_EVENTS) / 100)
+    ListEvents calls, and N only ever goes up.
+    """
+    return len(
+        MemoryClient(region_name=region_name).list_events(
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            max_results=MAX_EVENTS,
+        )
+    )
+
+
+def count_rehydrated_messages(saver, thread_id: str) -> int:
+    """How many messages a new saver recovers for this thread before any invoke.
+
+    Called on a saver built after the previous turn's graph was discarded, so a
+    non-zero answer here is state that came back from AgentCore Memory rather
+    than from anything still in this process.
+    """
+    tuple_ = saver.get_tuple({"configurable": {"thread_id": thread_id}})
+    if tuple_ is None:
+        return 0
+    return len(tuple_.checkpoint.get("channel_values", {}).get("messages", []))
+
+
+def probe_payload_floor(
+    memory_id: str, actor_id: str, session_id: str, region_name: str
+) -> int:
+    """Write each size in PAYLOAD_LADDER as a blob event and read it back.
+
+    Returns the largest size that round-tripped byte-identical. Writes into a
+    session of its own so that the event counts measured on the conversation
+    thread are the conversation's, not the probe's.
+
+    Byte-identical is checked rather than assumed. A store that silently
+    truncated a large payload would still return an event, and a checkpoint that
+    comes back short is a resumed conversation that has quietly lost its middle.
+    """
+    client = MemoryClient(region_name=region_name)
+    largest = 0
+    for size in PAYLOAD_LADDER:
+        blob = "x" * size
+        client.create_blob_event(
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            blob_data=blob,
+        )
+        events = client.list_events(
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            max_results=MAX_EVENTS,
+            include_payload=True,
+        )
+        read_back = {
+            item["blob"]
+            for event in events
+            for item in event.get("payload", [])
+            if "blob" in item
+        }
+        if blob not in read_back:
+            print(f"  payload {size} B did NOT read back identical")
+            break
+        print(f"  payload {size} B round-tripped byte-identical")
+        largest = size
+    return largest

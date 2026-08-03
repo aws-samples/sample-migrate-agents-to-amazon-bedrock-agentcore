@@ -59,6 +59,7 @@ import argparse
 import os
 import time
 import uuid
+from contextlib import contextmanager
 from typing import Sequence
 
 import boto3
@@ -90,6 +91,12 @@ from examples.stage2_rebuild.policy.attach_policy import (
 )
 from examples.stage2_rebuild.strands_agent import build_agent
 from examples.tools.gateway_mcp_tools import build_mcp_client
+from examples.validation.measure_walkthrough import (
+    Measurements,
+    count_events,
+    count_rehydrated_messages,
+    probe_payload_floor,
+)
 
 MODEL_ID = "us.anthropic.claude-sonnet-5"
 
@@ -252,7 +259,9 @@ def _llm(region_name: str) -> ChatBedrockConverse:
     return ChatBedrockConverse(model=MODEL_ID, region_name=region_name)
 
 
-def run_stage0(region_name: str, session_id: str) -> None:
+def run_stage0(
+    region_name: str, session_id: str, measured: Measurements = None
+) -> None:
     """Stage 0: local tools, in-process state, no AgentCore calls."""
     print("\n=== stage 0: self-hosted LangGraph ===")
     with running_stub() as base_url:
@@ -263,13 +272,26 @@ def run_stage0(region_name: str, session_id: str) -> None:
         )
         _ask(graph, "Hi, I'm Dana and my order number is 12345.", session_id)
         # Turn 2 never repeats the order number, so an answer that names the
-        # carrier came from the checkpointer.
-        _ask(graph, "Has it shipped yet, and who is carrying it?", session_id)
+        # carrier came from the checkpointer. Timed because it is the baseline the
+        # same turn against Gateway and AgentCore Memory is compared with: local
+        # HTTP stub, in-process state, nothing on the network but the model call.
+        with _optional_timing(measured, "stage 0 turn, local tools + in-process state"):
+            _ask(graph, "Has it shipped yet, and who is carrying it?", session_id)
         _ask(
             graph,
             "This is unacceptable. I want to speak to a human right now.",
             f"{session_id}-escalation",
         )
+
+
+@contextmanager
+def _optional_timing(measured, name: str):
+    """Time a block when measuring, and do nothing when not."""
+    if measured is None:
+        yield
+        return
+    with measured.timing(name):
+        yield
 
 
 def run_stage1(
@@ -278,6 +300,7 @@ def run_stage1(
     actor_id: str,
     session_id: str,
     region_name: str,
+    measured: Measurements = None,
 ) -> None:
     """Stage 1: Gateway tools and AgentCore Memory behind the same graph."""
     print("\n=== stage 1: Gateway tools + AgentCore Memory ===")
@@ -306,11 +329,36 @@ def run_stage1(
                 )
 
             _ask(graph(), "Hi, I'm Dana and my order number is 12345.", session_id)
+            if measured is not None:
+                measured.record(
+                    "memory events after turn 1",
+                    count_events(memory_id, actor_id, session_id, region_name),
+                )
+                # Counted on a saver built now, so anything it finds came back
+                # from the service. Taken before turn 2 rather than after,
+                # because after the invoke it would include what turn 2 wrote.
+                measured.record(
+                    "messages rehydrated before turn 2",
+                    count_rehydrated_messages(
+                        AgentCoreMemorySaver(
+                            memory_id, actor_id=actor_id, region_name=region_name
+                        ),
+                        session_id,
+                    ),
+                )
             # A second graph on the same thread id. Runtime would supply that id
             # as RequestContext.session_id on a different container; here two
             # separate objects stand in for two replicas, and the state they
             # share is in AgentCore Memory rather than in either of them.
-            _ask(graph(), "Has it shipped yet, and who is carrying it?", session_id)
+            with _optional_timing(
+                measured, "stage 1 turn, Gateway tools + AgentCore Memory"
+            ):
+                _ask(graph(), "Has it shipped yet, and who is carrying it?", session_id)
+            if measured is not None:
+                measured.record(
+                    "memory events after turn 2",
+                    count_events(memory_id, actor_id, session_id, region_name),
+                )
             _ask(
                 graph(),
                 "This is unacceptable. I want to speak to a human right now.",
@@ -514,16 +562,26 @@ def run(args: argparse.Namespace) -> None:
     # nobody knows to look for, and --teardown that skips it because the run
     # never reached the try block is the flag not doing what it says.
     created = {}
+    measured = None if args.no_measure else Measurements()
     try:
         if args.stage in AGENTCORE_STAGES:
-            gateway_id, gateway_url = create_gateway(
-                args.gateway_name, args.role_arn, region
-            )
+            # Timed from the CreateGateway call to the first READY from
+            # GetGateway, which is what create_gateway waits for. On a re-run it
+            # reuses the existing gateway and this number is a GetGateway, so it
+            # is labelled with which of the two happened.
+            with _optional_timing(measured, "gateway CreateGateway -> READY"):
+                gateway_id, gateway_url = create_gateway(
+                    args.gateway_name, args.role_arn, region
+                )
             created["gateway_id"] = gateway_id
-            created["target_id"] = register_target(
-                gateway_id, args.lambda_arn, args.target_name, region
-            )
-            created["memory_id"] = configure_memory(region, args.event_expiry_days)
+            with _optional_timing(measured, "target registration"):
+                created["target_id"] = register_target(
+                    gateway_id, args.lambda_arn, args.target_name, region
+                )
+            with _optional_timing(measured, "memory CreateMemory -> ACTIVE"):
+                created["memory_id"] = configure_memory(
+                    region, args.event_expiry_days
+                )
             if "2" in stages:
                 # Cedar names the gateway by ARN, which create_gateway does not
                 # return.
@@ -532,7 +590,7 @@ def run(args: argparse.Namespace) -> None:
                 ).get_gateway(gatewayIdentifier=gateway_id)["gatewayArn"]
 
         if "0" in stages:
-            run_stage0(region, session_id)
+            run_stage0(region, session_id, measured)
         if "1" in stages:
             run_stage1(
                 gateway_url,
@@ -540,6 +598,7 @@ def run(args: argparse.Namespace) -> None:
                 actor_id,
                 session_id,
                 region,
+                measured,
             )
         if "2" in stages:
             run_stage2(
@@ -552,6 +611,22 @@ def run(args: argparse.Namespace) -> None:
                 region,
                 created,
             )
+        if measured is not None and created.get("memory_id"):
+            print("\n=== payload floor probe ===")
+            measured.record(
+                "largest blob event round-tripped",
+                probe_payload_floor(
+                    created["memory_id"],
+                    actor_id,
+                    # Its own session, so the conversation's event counts stay
+                    # the conversation's.
+                    f"{session_id}-payload-probe",
+                    region,
+                ),
+                " B",
+            )
+        if measured is not None:
+            measured.report()
     finally:
         if args.teardown:
             teardown(
@@ -642,6 +717,14 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="With --teardown and no --stage, list what would be deleted and stop.",
+    )
+    parser.add_argument(
+        "--no-measure",
+        action="store_true",
+        help=(
+            "Skip the measurements table and the payload probe. The probe writes "
+            "up to one 4 MiB event."
+        ),
     )
     args = parser.parse_args()
 
