@@ -10,42 +10,67 @@ This repository contains sample code for the AWS blog post [Migrating agentic wo
 
 ## Overview
 
-The samples show two migration paths:
+One LangGraph customer-support agent is carried through three stages, so each migration path is a
+diff against the same starting point rather than a separate demo:
 
-- **Replatform**: Keep the agent you have and replace what surrounds it, so the agent logic is not rewritten (`examples/stage1_replatform/`).
-- **Rebuild**: Rewrite your agent using the [Strands Agents SDK](https://github.com/strands-agents/sdk-python) for tighter AgentCore integration and model-driven orchestration.
+- **Stage 0 — the agent you already have** (`examples/stage0_langgraph/`): a compiled `StateGraph`,
+  a hand-written escalation router, three tools over HTTP, an in-process checkpointer. No AgentCore
+  calls at all.
+- **Stage 1 — replatform** (`examples/stage1_replatform/`): keep the agent, replace what surrounds
+  it. Graph, router, prompts and tool bodies are imported unchanged; Runtime hosts the process,
+  Gateway fronts two of the three tools, AgentCore Memory holds the conversation state.
+- **Stage 2 — rebuild** (`examples/stage2_rebuild/`): the same agent on the
+  [Strands Agents SDK](https://github.com/strands-agents/harness-sdk), trading the router for a
+  model-driven loop, with Cedar rules in Policy in AgentCore over the gateway's tool calls.
 
-The blog post describes a third path, handing the orchestration loop to the AgentCore harness, which has no sample code in this repository.
+The post describes a third path, handing the orchestration loop to the AgentCore harness, which has
+no sample code here. `examples/validation/verify_diff_claim.py` measures the stage 0 → stage 1 cost
+from the files on disk rather than asserting it, so the post's numbers can be re-checked.
 
 ## Repository structure
 
 ```
-Dockerfile                          # Sample ARM64 container for AgentCore Runtime
+Dockerfile                          # ARM64 image for Runtime; the stage is a build argument
+requirements.txt                    # Six entries; langchain-aws is pinned, the rest are floors
+setup.sh                            # Create .venv, install requirements, check credentials
 examples/
-├── run_walkthrough.py          # Run the full sequence end to end (create -> invoke -> teardown)
-├── gateway/
-│   ├── create_gateway.py       # Create an AgentCore Gateway (MCP, AWS_IAM authorizer)
-│   ├── register_target.py      # Register a Lambda target and its tool schema
-│   └── lambda_target/
-│       ├── lambda_function.py  # Lambda handler backing the gateway target
-│       └── deploy.sh           # Create the execution role and function from scratch
+├── run_walkthrough.py              # Run the stages in order (create -> invoke -> teardown)
+├── stage0_langgraph/
+│   ├── README.md                   # What stage 0 is, and what it costs you to operate
+│   ├── agent.py                    # build_graph(): the StateGraph, the router, the tool loop
+│   ├── prompts.py                  # System and classifier prompts
+│   ├── tools.py                    # lookup_order, process_return, search_faq over HTTP
+│   ├── local_api.py                # Localhost stub for the orders API
+│   └── run_local.py                # Stage-0 entry point (needs Bedrock model access)
+├── stage1_replatform/
+│   ├── agent_runtime.py            # Stage-1 entry point for AgentCore Runtime
+│   ├── agentcore_memory_saver.py   # LangGraph checkpointer over AgentCore Memory
+│   └── langchain_mcp_tools.py      # Gateway MCP tools as LangChain tools
 ├── stage2_rebuild/
-│   ├── strands_agent.py        # Rebuild with Strands Agents SDK (memory-backed)
+│   ├── strands_agent.py            # Stage-2 entry point, its tools, and build_agent()
 │   └── policy/
-│       ├── support_tools.cedar # Cedar rules authorizing each gateway tool call
-│       └── attach_policy.py    # Register the rules and attach them to the gateway
-├── tools/
-│   └── gateway_mcp_tools.py    # Connect to a gateway as MCP tools (SigV4-signed)
+│       ├── support_tools.cedar     # Cedar rules authorizing each gateway tool call
+│       └── attach_policy.py        # Register the rules and attach them to the gateway
+├── gateway/
+│   ├── create_gateway.py           # Create an AgentCore Gateway (MCP, AWS_IAM authorizer)
+│   ├── register_target.py          # Register a Lambda target and its tool schema
+│   └── lambda_target/
+│       ├── lambda_function.py      # Lambda handler backing the gateway target
+│       └── deploy.sh               # Create the execution roles and function from scratch
 ├── memory/
-│   └── configure_memory.py     # Set up AgentCore Memory (summary, preference, semantic)
+│   └── configure_memory.py         # Set up AgentCore Memory (summary, preference, semantic)
+├── tools/
+│   └── gateway_mcp_tools.py        # Connect to a gateway as MCP tools (SigV4-signed)
 └── validation/
-    └── verify_diff_claim.py    # Measure the post's two-number claim from the tree
+    └── verify_diff_claim.py        # Measure the post's two-number claim from the tree
 
 docs/
-└── security-comparison.md      # Security architecture: self-hosted vs. AgentCore
+└── security-comparison.md          # Self-hosted vs. AgentCore, and the three ways to stop an agent
+
+tests/                              # Offline suite; fakes for Bedrock, MCP, Memory and Cedar
 
 .github/workflows/
-└── deploy-agent.yml            # CI/CD pipeline for ARM64 builds and AgentCore deployment (manual trigger)
+└── deploy-agent.yml                # CI/CD pipeline for ARM64 builds and AgentCore deployment (manual trigger)
 ```
 
 ## Prerequisites
@@ -84,6 +109,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+The test suite needs no credentials and creates nothing — the chat model, the gateway, the memory
+service and the Cedar evaluator are faked, everything else is real:
+
+```bash
+python -m pytest tests/ -q
+```
+
 ## Run order
 
 Before the walkthrough can register a gateway target, the Lambda that backs the
@@ -120,6 +152,9 @@ order and passes each stage's result to the next:
    tools (signed with SigV4 by `examples/tools/gateway_mcp_tools.py`, converted
    to LangChain tools by `examples/stage1_replatform/langchain_mcp_tools.py`) and
    the AgentCore Memory checkpointer keyed on the memory id.
+5. **Rebuild and authorize it** (`examples/stage2_rebuild/`) — builds the Strands
+   agent on those same three resources, then registers the Cedar rules and
+   attaches them to the gateway in `ENFORCE` mode.
 
 Run every stage in order, with a teardown at the end:
 
@@ -142,13 +177,14 @@ Both ARNs are printed by `examples/gateway/lambda_target/deploy.sh`:
 `--lambda-arn` is the function ARN, and `--role-arn` is the gateway execution
 role ARN that the same script creates.
 
-Each stage can also be run on its own; pass the previous stage's output as an
-argument or environment variable (`GATEWAY_ID`, `GATEWAY_URL`,
-`AGENTCORE_MEMORY_ID`).
+The individual scripts also run on their own, taking the previous step's output as an argument or
+an environment variable — `create_gateway.py` and `register_target.py` read `GATEWAY_ID`,
+`gateway_mcp_tools.py` and `stage1_replatform/agent_runtime.py` read `GATEWAY_URL`, and both
+Runtime entry points read `AGENTCORE_MEMORY_ID`.
 
 ## Additional resources
 
-- [Security architecture comparison](docs/security-comparison.md): Side-by-side comparison of security responsibilities when running agents on self-hosted infrastructure vs. Amazon Bedrock AgentCore.
+- [Security architecture comparison](docs/security-comparison.md): what self-hosting owns versus what AgentCore owns, and the difference between a sentence in the system prompt, a Bedrock Guardrail, and Cedar rules in Policy in AgentCore.
 - [CI/CD deployment workflow](.github/workflows/deploy-agent.yml): Sample GitHub Actions pipeline for building ARM64 containers and deploying to AgentCore Runtime. Uses `workflow_dispatch` (manual trigger only).
 
 ## Clean up
@@ -161,8 +197,9 @@ To remove resources by hand:
 
 1. Delete the gateway target, then the gateway, in that order.
 2. Delete the AgentCore Memory resource.
-3. Delete the Lambda function and the two IAM roles created by `examples/gateway/lambda_target/deploy.sh`, which are the Lambda execution role and the gateway execution role.
-4. Remove any AgentCore Runtime deployment from the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/).
+3. Delete the Cedar policies, then the policy engine that holds them.
+4. Delete the Lambda function and the two IAM roles created by `examples/gateway/lambda_target/deploy.sh`, which are the Lambda execution role and the gateway execution role.
+5. Remove any AgentCore Runtime deployment from the [Amazon Bedrock console](https://console.aws.amazon.com/bedrock/).
 
 ## Security
 

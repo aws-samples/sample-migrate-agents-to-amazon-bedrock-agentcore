@@ -48,7 +48,7 @@ from examples.stage2_rebuild.policy.attach_policy import (
     support_agent_principal,
 )
 from examples.stage2_rebuild import strands_agent
-from examples.stage2_rebuild.strands_agent import MODEL_ID, build_agent
+from examples.stage2_rebuild.strands_agent import build_agent
 from tests import fake_cedar
 from tests.fake_cedar import Entity
 from tests.fake_control_plane import (
