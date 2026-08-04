@@ -11,7 +11,7 @@ value becomes the MCP tool result content.
 
 Implements lookup_order and process_return to match the toolSchema declared in
 examples/gateway/register_target.py and the scenario in
-examples/rebuild/strands_agent.py.
+examples/stage2_rebuild/strands_agent.py.
 """
 
 

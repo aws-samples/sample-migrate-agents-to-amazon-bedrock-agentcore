@@ -72,11 +72,10 @@ LAMBDA_ARN="$(aws lambda get-function \
   --query 'Configuration.FunctionArn' --output text)"
 
 # 4. Gateway execution role. The gateway assumes this role (trusting the
-# bedrock-agentcore service) and invokes the Lambda target as this role, so the
-# only permission it needs is lambda:InvokeFunction on that one function. No
-# Lambda resource policy (lambda add-permission) is required: with
-# credentialProviderType GATEWAY_IAM_ROLE the gateway calls Invoke with this
-# role's identity, and a same-account identity policy authorizes it on its own.
+# bedrock-agentcore service) and invokes the Lambda target as this role. No Lambda
+# resource policy (lambda add-permission) is required: with credentialProviderType
+# GATEWAY_IAM_ROLE the gateway calls Invoke with this role's identity, and a
+# same-account identity policy authorizes it on its own.
 aws iam create-role \
   --role-name "${GATEWAY_ROLE_NAME}" \
   --assume-role-policy-document '{
@@ -88,16 +87,46 @@ aws iam create-role \
     }]
   }'
 
+# The second statement is what stage 2 needs and is easy to miss, because the
+# service asks for it one permission at a time and two of the three actions are
+# not in the SDK model at all. UpdateGateway does not simply record the policy
+# engine: it runs a preflight *as this role* (visible as the session name
+# GenesisPolicyEngineCheck) and refuses the attachment if the role cannot read the
+# engine and authorize against it. Without these three actions, stage 2's
+# attach_to_gateway fails on a gateway this script built — measured, in four
+# rounds, one error per missing permission, and the error class changes from
+# ValidationException to AccessDeniedException part way through.
+#
+# The resources are the account's gateways and policy engines in this region
+# rather than two specific ARNs, because neither exists yet: this script runs
+# before create_gateway and before the policy engine. AuthorizeAction is needed on
+# both the engine and the gateway.
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+
 aws iam put-role-policy \
   --role-name "${GATEWAY_ROLE_NAME}" \
-  --policy-name LambdaInvokeAccess \
+  --policy-name GatewayExecutionAccess \
   --policy-document "{
     \"Version\": \"2012-10-17\",
-    \"Statement\": [{
-      \"Effect\": \"Allow\",
-      \"Action\": \"lambda:InvokeFunction\",
-      \"Resource\": \"${LAMBDA_ARN}\"
-    }]
+    \"Statement\": [
+      {
+        \"Effect\": \"Allow\",
+        \"Action\": \"lambda:InvokeFunction\",
+        \"Resource\": \"${LAMBDA_ARN}\"
+      },
+      {
+        \"Effect\": \"Allow\",
+        \"Action\": [
+          \"bedrock-agentcore:GetPolicyEngine\",
+          \"bedrock-agentcore:AuthorizeAction\",
+          \"bedrock-agentcore:PartiallyAuthorizeActions\"
+        ],
+        \"Resource\": [
+          \"arn:aws:bedrock-agentcore:${REGION}:${ACCOUNT_ID}:policy-engine/*\",
+          \"arn:aws:bedrock-agentcore:${REGION}:${ACCOUNT_ID}:gateway/*\"
+        ]
+      }
+    ]
   }"
 
 GATEWAY_ROLE_ARN="$(aws iam get-role --role-name "${GATEWAY_ROLE_NAME}" \

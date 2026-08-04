@@ -27,19 +27,27 @@ if [ -z "$PYTHON_CMD" ]; then
 fi
 echo "[OK] Python: $("$PYTHON_CMD" --version)"
 
-# Check AWS CLI
+# Check the AWS CLI. Only ./examples/gateway/lambda_target/deploy.sh uses it; the
+# walkthrough and every example call AWS through boto3. So a missing CLI is a
+# warning, not a failure: installing and running the tests never touch it.
 if ! command -v aws &>/dev/null; then
-    echo "ERROR: AWS CLI not found. Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
-    exit 1
+    echo "[WARN] AWS CLI not found. ./examples/gateway/lambda_target/deploy.sh needs it to"
+    echo "       create the Lambda that backs the gateway target. Nothing else does."
+    echo "       Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+else
+    echo "[OK] AWS CLI: $(aws --version 2>&1 | head -1)"
 fi
-echo "[OK] AWS CLI: $(aws --version 2>&1 | head -1)"
 
-# Check AWS credentials
-if ! aws sts get-caller-identity &>/dev/null; then
-    echo "ERROR: AWS credentials not configured. Run 'aws configure' first."
-    exit 1
+# Check AWS credentials. A warning, not an exit: the install below and the test
+# suite both work without them, and that is where a first-time reader starts.
+if command -v aws &>/dev/null && aws sts get-caller-identity &>/dev/null; then
+    echo "[OK] AWS credentials configured"
+else
+    echo "[WARN] No usable AWS credentials. Run 'aws configure'. This does not block setup:"
+    echo "       python -m unittest discover -s tests             works without credentials"
+    echo "       python -m examples.stage0_langgraph.run_local    fails without Bedrock model access"
+    echo "       examples/run_walkthrough.py                      creates real AWS resources"
 fi
-echo "[OK] AWS credentials configured"
 
 # Create virtual environment
 if [ ! -d ".venv" ]; then
@@ -59,4 +67,9 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "To activate the environment: source .venv/bin/activate"
-echo "Then run any example:        python examples/rebuild/strands_agent.py"
+echo "Then the offline suite:      python -m unittest discover -s tests -v"
+echo "Then the stage-0 agent:      python -m examples.stage0_langgraph.run_local"
+echo ""
+echo "run_local.py is the agent before any migration. It needs Bedrock model access and"
+echo "nothing else — it starts its own orders-API stub on a loopback port. The later"
+echo "stages need AWS resources that do not exist yet; see Run order in README.md."
