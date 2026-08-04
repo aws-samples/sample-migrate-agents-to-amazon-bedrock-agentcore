@@ -265,7 +265,9 @@ Two things about the zip are not obvious, and each costs a failed deploy to lear
 - **Cross-compile the dependencies.** Runtime is ARM64, so a plain `pip install --target` on macOS
   or an x86 machine produces the wrong binaries and the deploy fails with a message about
   incompatible binary files that names none of them. Install with
-  `--platform manylinux2014_aarch64 --only-binary=:all:`. That is a pip flag, not a container.
+  `--platform manylinux2014_aarch64 --python-version 3.12 --only-binary=:all:`. Those are pip flags, not
+  a container. The version has to match the runtime the deploy names, and omitting it vendors wheels for
+  whichever interpreter you happen to be running.
 - **A `requirements.txt` inside the zip is inert.** Nothing installs it; the dependencies have to be
   vendored into the archive. **The error message for getting this wrong points away from the
   cause:** a missing module surfaces as `Runtime initialization time exceeded ... initialization
