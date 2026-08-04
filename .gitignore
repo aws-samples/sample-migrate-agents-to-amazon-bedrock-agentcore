@@ -28,3 +28,6 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local authoring scratch, never part of the sample
+PR-DESCRIPTION.md
