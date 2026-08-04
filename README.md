@@ -1,6 +1,6 @@
 # Migrating agentic workloads to Amazon Bedrock AgentCore
 
-This repository contains sample code for the AWS blog post "Migrating agentic workloads to Amazon Bedrock AgentCore from other platforms". **The post is not yet published, so there is no link to give yet, and `TODO: post URL` is what goes here until there is.** It demonstrates how to migrate an existing LangGraph agent to [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
+This repository contains sample code for the AWS blog post "Migrating agentic workloads to Amazon Bedrock AgentCore from other platforms". It demonstrates how to migrate an existing LangGraph agent to [Amazon Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/).
 
 > **Important:** This sample code is for demonstration and educational purposes only. Review and adapt security configurations, error handling, and resource sizing for your production environment.
 
