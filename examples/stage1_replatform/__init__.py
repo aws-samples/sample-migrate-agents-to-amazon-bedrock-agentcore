@@ -10,7 +10,8 @@ examples.stage0_langgraph and are not restated here.
 
 Three services take over three burdens. Runtime hosts the loop
 (agent_runtime.py), Gateway serves two of the three tools
-(langchain_mcp_tools.py), and Memory holds the conversation state
-(agentcore_memory_saver.py). Model inference does not move: it was already going
-to Amazon Bedrock in stage 0, and it was never the problem.
+(langchain_mcp_tools.py), and Memory holds the conversation state, through
+langgraph-checkpoint-aws rather than through anything in this package. Model
+inference does not move: it was already going to Amazon Bedrock in stage 0, and it
+was never the problem.
 """

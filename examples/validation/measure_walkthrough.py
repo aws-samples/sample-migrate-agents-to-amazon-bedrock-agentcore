@@ -15,10 +15,11 @@ and they are marked because the names read like claims.
 
 Two of them are not timings and are the ones worth reading:
 
-``memory events`` is how many events the thread holds after each turn. It grows
-by one per superstep and there is no trim primitive, so this number is the read
-cost of the next turn — see the MAX_EVENTS note in
-examples/stage1_replatform/agentcore_memory_saver.py.
+``memory events`` is how many events the thread holds after each turn. Every
+superstep appends one event per channel it wrote plus one for the checkpoint
+itself, and there is no trim primitive, so this number is the read cost of the
+next turn: AgentCoreMemorySaver.get_tuple pages the whole stream at 100 events a
+call and, unless it is built with a ``limit``, does not stop early.
 
 ``messages rehydrated`` is how many messages a freshly built graph recovered
 from AgentCore Memory *before* invoking anything. It is the cross-instance claim
@@ -39,14 +40,21 @@ from contextlib import contextmanager
 
 from bedrock_agentcore.memory import MemoryClient
 
-from examples.stage1_replatform.agentcore_memory_saver import MAX_EVENTS
+# A cap on the count below, not a limit anything enforces. MemoryClient.list_events
+# hardcodes the API maxResults to 100, follows nextToken internally, and treats its
+# own max_results as a total across pages, so this is how far the two functions here
+# will page before they stop counting. It is set high because the number it bounds
+# is the one being measured: a thread that has quietly passed the cap would report a
+# flat count and read like a thread that had stopped growing.
+EVENT_SCAN_CAP = 10000
 
 # Sizes the payload probe writes, in bytes. The largest is 4 MiB. The ladder
 # stops there rather than binary-searching for a ceiling, so what it establishes
 # is a floor: blob events of at least this size round-trip intact. Treat it as
 # the largest size measured and not as a supported limit, which is the honest
 # reading and also the useful one, because a checkpoint this large is a bad idea
-# under any ceiling — the whole blob is rewritten every superstep.
+# under any ceiling — a channel is written out in full on every superstep that
+# touches it, and the whole stream is read back on every get_tuple.
 PAYLOAD_LADDER = (10_240, 102_400, 512_000, 1_048_576, 4_194_304)
 
 class Measurements:
@@ -99,27 +107,32 @@ def count_events(
     """How many events the thread holds right now.
 
     This is the quantity the saver's read cost is a function of, so counting it
-    is not bookkeeping: one get_tuple costs ceil(min(N, MAX_EVENTS) / 100)
-    ListEvents calls, and N only ever goes up.
+    is not bookkeeping: one get_tuple costs ceil(N / 100) ListEvents calls, and N
+    only ever goes up.
     """
     return len(
         MemoryClient(region_name=region_name).list_events(
             memory_id=memory_id,
             actor_id=actor_id,
             session_id=session_id,
-            max_results=MAX_EVENTS,
+            max_results=EVENT_SCAN_CAP,
         )
     )
 
 
-def count_rehydrated_messages(saver, thread_id: str) -> int:
+def count_rehydrated_messages(saver, thread_id: str, actor_id: str) -> int:
     """How many messages a new saver recovers for this thread before any invoke.
 
     Called on a saver built after the previous turn's graph was discarded, so a
     non-zero answer here is state that came back from AgentCore Memory rather
     than from anything still in this process.
+
+    ``actor_id`` is required, not incidental: the saver resolves the event stream
+    from thread_id and actor_id together and raises without either.
     """
-    tuple_ = saver.get_tuple({"configurable": {"thread_id": thread_id}})
+    tuple_ = saver.get_tuple(
+        {"configurable": {"thread_id": thread_id, "actor_id": actor_id}}
+    )
     if tuple_ is None:
         return 0
     return len(tuple_.checkpoint.get("channel_values", {}).get("messages", []))
@@ -152,7 +165,7 @@ def probe_payload_floor(
             memory_id=memory_id,
             actor_id=actor_id,
             session_id=session_id,
-            max_results=MAX_EVENTS,
+            max_results=EVENT_SCAN_CAP,
             include_payload=True,
         )
         read_back = {

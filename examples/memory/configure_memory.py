@@ -7,9 +7,8 @@ event_expiry_days is passed explicitly on purpose. MemoryClient.create_memory
 defaults it to 90 (bedrock_agentcore/memory/client.py:160), so a caller that omits
 it silently accepts a 90-day retention it never chose; the service accepts 3 to
 365. It is the retention of the raw event stream, which is also where
-examples/stage1_replatform/agentcore_memory_saver.py writes its checkpoints, so
-this number is how long a conversation can be resumed, not just how long the
-transcript is kept.
+AgentCoreMemorySaver writes its checkpoints, so this number is how long a
+conversation can be resumed, not just how long the transcript is kept.
 
 Idempotent, like create_gateway.py and register_target.py: a memory of this name
 is reused rather than recreated, because CreateMemory rejects a duplicate name.

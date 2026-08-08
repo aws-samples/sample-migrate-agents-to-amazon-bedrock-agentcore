@@ -345,6 +345,35 @@ class RuntimeEntrypointTest(unittest.TestCase):
         self.assertIn("shipped", same["result"])
         self.assertIn("What is your order number?", other["result"])
 
+    def test_the_config_carries_the_actor_id_beside_the_thread_id(self):
+        # AgentCoreMemorySaver resolves the event stream from thread_id and
+        # actor_id together and raises InvalidConfigError without either, so the
+        # entrypoint has to send both. The MemorySaver the other tests here run on
+        # would ignore a missing actor_id, which is why this one records the config
+        # instead of asserting on the answer.
+        captured = {}
+
+        class RecordingGraph:
+            def invoke(self, state, config):
+                captured.update(config["configurable"])
+                return {"messages": [AIMessage("recorded")]}
+
+        agent_runtime._graph = RecordingGraph()
+        previous = os.environ.get("AGENTCORE_ACTOR_ID")
+        os.environ["AGENTCORE_ACTOR_ID"] = "customer-7"
+        self.addCleanup(self._restore_actor_id, previous)
+
+        agent_runtime.agent_invocation({"prompt": "hi"}, FakeContext("sess-actor"))
+
+        self.assertEqual(captured, {"thread_id": "sess-actor", "actor_id": "customer-7"})
+
+    @staticmethod
+    def _restore_actor_id(previous):
+        if previous is None:
+            os.environ.pop("AGENTCORE_ACTOR_ID", None)
+        else:
+            os.environ["AGENTCORE_ACTOR_ID"] = previous
+
     def test_a_missing_session_id_falls_back_rather_than_crashing(self):
         # RequestContext.session_id is Optional and is None on a bare local call.
         out = agent_runtime.agent_invocation(

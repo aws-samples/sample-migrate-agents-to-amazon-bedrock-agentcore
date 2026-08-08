@@ -25,10 +25,10 @@ import os
 from bedrock_agentcore import BedrockAgentCoreApp
 from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage
+from langgraph_checkpoint_aws import AgentCoreMemorySaver
 
 from examples.stage0_langgraph.agent import build_graph
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
-from examples.stage1_replatform.agentcore_memory_saver import AgentCoreMemorySaver
 from examples.stage1_replatform.langchain_mcp_tools import merge_tools, to_langchain_tools
 from examples.tools.gateway_mcp_tools import build_mcp_client
 
@@ -76,14 +76,19 @@ def support_graph():
             model=MODEL_ID,
             region_name=os.environ.get("AWS_REGION", "us-east-1"),
         )
-        # Was MemorySaver(), which died with the process. The thread_id config at
-        # invoke time does not change; only where the state lives does.
+        # Was MemorySaver(), which died with the process. Only where the state
+        # lives changes; the graph is still stage 0's.
+        #
+        # The saver is constructed with the memory id and nothing else. It takes no
+        # actor_id, because it reads thread_id and actor_id off the RunnableConfig
+        # on every call rather than binding either at construction — see the
+        # entrypoint below. region_name is not a named parameter either; it goes
+        # through **boto3_kwargs to the client the saver builds.
         _graph = build_graph(
             llm=llm,
             tools=gateway_tools(),
             checkpointer=AgentCoreMemorySaver(
                 os.environ["AGENTCORE_MEMORY_ID"],
-                actor_id=os.environ.get("AGENTCORE_ACTOR_ID", "langgraph"),
                 region_name=os.environ.get("AWS_REGION", "us-east-1"),
             ),
         )
@@ -95,9 +100,19 @@ def agent_invocation(payload, context):
     """What Runtime calls. The graph invocation inside it is stage 0's, unchanged."""
     state = support_graph().invoke(
         {"messages": [HumanMessage(payload.get("prompt", ""))]},
-        # RequestContext.session_id is Optional, and is None when the container is
-        # invoked without one; a fixed fallback keeps local runs on one thread.
-        config={"configurable": {"thread_id": context.session_id or "local-session"}},
+        config={
+            "configurable": {
+                # RequestContext.session_id is Optional, and is None when the
+                # container is invoked without one; a fixed fallback keeps local
+                # runs on one thread.
+                "thread_id": context.session_id or "local-session",
+                # Required, not optional: the saver raises InvalidConfigError on a
+                # config without it, the same way it does without a thread_id.
+                # Together they are the (actor_id, session_id) event stream the
+                # checkpoint is written into.
+                "actor_id": os.environ.get("AGENTCORE_ACTOR_ID", "langgraph"),
+            }
+        },
     )
     return {"result": state["messages"][-1].text}
 

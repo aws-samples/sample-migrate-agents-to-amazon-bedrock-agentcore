@@ -22,11 +22,16 @@ WHAT COUNTS AS THE READER'S AGENT, AND WHAT COUNTS AS GLUE
   same agent after the move: it is the file with their application's name on it,
   the one they edit and deploy.
 
-  Glue is the two stage-1 modules that are libraries rather than application
-  code -- the checkpointer over AgentCore Memory and the MCP-to-LangChain tool
-  adapter. Neither is shipped by bedrock-agentcore or by langchain-aws, so a
-  reader migrating a LangGraph agent writes both. That is the honest cost of the
-  move and the reason the claim is two numbers.
+  Glue is the stage-1 module that is a library rather than application code: the
+  MCP-to-LangChain tool adapter. Neither bedrock-agentcore nor langchain-aws
+  ships one, so a reader migrating a LangGraph agent writes it. That is the
+  honest cost of the move and the reason the claim is two numbers.
+
+  There were two glue modules here, and the other was the larger: a checkpointer
+  over AgentCore Memory. It is gone, because langgraph-checkpoint-aws ships
+  AgentCoreMemorySaver. That cost is now a pinned line in requirements.txt rather
+  than a file the reader owns, which is a real result and not a rounding -- so it
+  is recorded here rather than quietly absorbed into a smaller number two.
 
   Number 1 is a line-level diff between the two entry points, because both play
   the same role: construct the model, the tools and the checkpointer, then
@@ -60,12 +65,13 @@ glue modules put together. Two things keep it out of the glue count:
      walkthrough has requirements a reader does not: reproducible from a checkout
      with pip and boto3 and nothing else, idempotent across re-runs, able to
      delete everything it made, and instrumented to time four things. The
-     checkpointer and the MCP adapter are holes in the SDK. Deployment is not a
-     hole; it is a choice of tool.
+     MCP adapter is a hole in the SDK -- the checkpointer no longer is, and the
+     file that used to fill it is no longer in this repo. Deployment is not a hole
+     either; it is a choice of tool.
 
-  2. The glue modules run inside the deployed artifact — the checkpointer *is* the
-     agent's state and the adapter *is* its tools, and removing either stops the
-     agent working. deploy_runtime.py runs on the developer's machine and is never
+  2. The glue module runs inside the deployed artifact — the adapter *is* the
+     agent's tools, and removing it stops the agent working.
+     deploy_runtime.py runs on the developer's machine and is never
      imported by the agent at all. That line is mechanical rather than a matter of
      taste, so main() checks it instead of asserting it: if the entry point ever
      imports the deploy module, the check fails and this classification has to be
@@ -90,7 +96,6 @@ STAGE0_AGENT = [
 
 # Glue: written for this migration, shipped by no SDK, and loaded by the agent.
 STAGE1_GLUE = [
-    REPO / "examples/stage1_replatform/agentcore_memory_saver.py",
     REPO / "examples/stage1_replatform/langchain_mcp_tools.py",
 ]
 

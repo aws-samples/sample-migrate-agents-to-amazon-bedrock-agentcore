@@ -83,6 +83,7 @@ from bedrock_agentcore.memory import MemoryClient
 from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph_checkpoint_aws import AgentCoreMemorySaver
 
 from examples.gateway.create_gateway import create_gateway, existing_gateway_id
 from examples.gateway.register_target import existing_target_id, register_target
@@ -96,7 +97,6 @@ from examples.stage0_langgraph.agent import build_graph
 from examples.stage0_langgraph.local_api import running_stub
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
 from examples.stage1_replatform import deploy_runtime
-from examples.stage1_replatform.agentcore_memory_saver import AgentCoreMemorySaver
 from examples.stage1_replatform.langchain_mcp_tools import merge_tools, to_langchain_tools
 from examples.stage2_rebuild.policy.attach_policy import (
     POLICY_ENGINE_NAME,
@@ -298,12 +298,21 @@ def teardown(
         )
 
 
-def _ask(graph, prompt: str, thread_id: str) -> dict:
-    """Invoke the graph on one thread and print what the run did."""
+def _ask(graph, prompt: str, thread_id: str, actor_id: str = "") -> dict:
+    """Invoke the graph on one thread and print what the run did.
+
+    ``actor_id`` is passed only by the stages checkpointing to AgentCore Memory,
+    because AgentCoreMemorySaver reads it off the config rather than taking it at
+    construction and raises without it. Stage 0's in-process MemorySaver has no
+    such key, so it is omitted rather than passed and ignored.
+    """
     print(f"\n[{thread_id}] customer: {prompt}")
+    configurable = {"thread_id": thread_id}
+    if actor_id:
+        configurable["actor_id"] = actor_id
     state = graph.invoke(
         {"messages": [HumanMessage(prompt)]},
-        config={"configurable": {"thread_id": thread_id}},
+        config={"configurable": configurable},
     )
     for message in state["messages"]:
         if message.type == "tool":
@@ -394,16 +403,26 @@ def run_stage1(
             print(f"tools: {[t.name for t in tools]}")
 
             def graph():
-                """A fresh graph, and so a fresh checkpointer, per invocation."""
+                """A fresh graph, and so a fresh checkpointer, per invocation.
+
+                The saver takes the memory id and nothing else. actor_id is not a
+                constructor parameter: it travels on each invocation's config
+                alongside thread_id, which is why every _ask below passes it.
+                """
                 return build_graph(
                     llm=_llm(region_name),
                     tools=tools,
                     checkpointer=AgentCoreMemorySaver(
-                        memory_id, actor_id=actor_id, region_name=region_name
+                        memory_id, region_name=region_name
                     ),
                 )
 
-            _ask(graph(), "Hi, I'm Dana and my order number is 12345.", session_id)
+            _ask(
+                graph(),
+                "Hi, I'm Dana and my order number is 12345.",
+                session_id,
+                actor_id,
+            )
             if measured is not None:
                 measured.record(
                     "memory events after turn 1",
@@ -415,10 +434,9 @@ def run_stage1(
                 measured.record(
                     "messages rehydrated before turn 2",
                     count_rehydrated_messages(
-                        AgentCoreMemorySaver(
-                            memory_id, actor_id=actor_id, region_name=region_name
-                        ),
+                        AgentCoreMemorySaver(memory_id, region_name=region_name),
                         session_id,
+                        actor_id,
                     ),
                 )
             # A second graph on the same thread id. Runtime would supply that id
@@ -428,7 +446,12 @@ def run_stage1(
             with _optional_timing(
                 measured, "stage 1 turn, Gateway tools + AgentCore Memory"
             ):
-                _ask(graph(), "Has it shipped yet, and who is carrying it?", session_id)
+                _ask(
+                    graph(),
+                    "Has it shipped yet, and who is carrying it?",
+                    session_id,
+                    actor_id,
+                )
             if measured is not None:
                 measured.record(
                     "memory events after turn 2",
@@ -438,6 +461,7 @@ def run_stage1(
                 graph(),
                 "This is unacceptable. I want to speak to a human right now.",
                 f"{session_id}-escalation",
+                actor_id,
             )
         finally:
             mcp_client.stop(None, None, None)

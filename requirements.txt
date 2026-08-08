@@ -3,5 +3,7 @@ bedrock-agentcore>=1.12.0
 mcp>=1.27.0
 requests>=2.31.0
 langgraph>=0.4.0
-# Pinned, not a floor: this is the version the walkthrough was verified against.
+# Pinned, not floors: these are the versions the walkthrough was verified against.
 langchain-aws==1.6.2
+# Ships AgentCoreMemorySaver, the LangGraph checkpointer over AgentCore Memory.
+langgraph-checkpoint-aws==1.2.1

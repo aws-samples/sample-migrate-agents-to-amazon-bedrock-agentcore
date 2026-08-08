@@ -43,7 +43,7 @@ cost from the files on disk rather than asserting it, so you can re-check the po
 
 ```
 Dockerfile                          # Optional ARM64 image; the zip deploy is the path used here
-requirements.txt                    # Six entries; langchain-aws is pinned, the rest are floors
+requirements.txt                    # Seven entries; two are pinned, the rest are floors
 setup.sh                            # Create .venv, install requirements, warn on missing credentials
 examples/
 ├── run_walkthrough.py              # Run the stages in order (create -> invoke -> teardown)
@@ -56,7 +56,6 @@ examples/
 │   └── run_local.py                # Stage-0 entry point (needs Bedrock model access)
 ├── stage1_replatform/
 │   ├── agent_runtime.py            # Stage-1 entry point for AgentCore Runtime
-│   ├── agentcore_memory_saver.py   # LangGraph checkpointer over AgentCore Memory
 │   ├── deploy_runtime.py           # Package the agent as a zip and deploy it to Runtime
 │   └── langchain_mcp_tools.py      # Gateway MCP tools as LangChain tools
 ├── stage2_rebuild/
@@ -196,7 +195,9 @@ order and passes each stage's result to the next:
    `build_graph()` compiles the stage-0 graph with the gateway-discovered MCP
    tools (signed with SigV4 by `examples/tools/gateway_mcp_tools.py`, converted
    to LangChain tools by `examples/stage1_replatform/langchain_mcp_tools.py`) and
-   the AgentCore Memory checkpointer keyed on the memory id.
+   `AgentCoreMemorySaver` from `langgraph-checkpoint-aws`, constructed on the
+   memory id. Each invocation supplies the `thread_id` and `actor_id` that
+   together name the event stream the checkpoint is written into.
 5. **Deploy that same agent to Runtime**
    (`examples/stage1_replatform/deploy_runtime.py`). This packages
    `agent_runtime.py` as a zip, uploads it to Amazon S3, creates the runtime, and
