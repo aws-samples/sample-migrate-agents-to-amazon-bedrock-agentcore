@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Configure Amazon Bedrock AgentCore Memory with summary, preference, and semantic strategies.
+"""Configure Amazon Bedrock AgentCore Memory: the raw event stream both stages ride.
 
 event_expiry_days is passed explicitly on purpose. MemoryClient.create_memory
 defaults it to 90 (bedrock_agentcore/memory/client.py:160), so a caller that omits
@@ -80,26 +80,14 @@ def configure_memory(
         name=MEMORY_NAME,
         description="Memory for migrated customer support agent",
         event_expiry_days=event_expiry_days,
-        strategies=[
-            {
-                "summaryMemoryStrategy": {
-                    "name": "SessionSummarizer",
-                    "namespaceTemplates": ["/summaries/{actorId}/{sessionId}/"],
-                }
-            },
-            {
-                "userPreferenceMemoryStrategy": {
-                    "name": "PreferenceLearner",
-                    "namespaceTemplates": ["/preferences/{actorId}/"],
-                }
-            },
-            {
-                "semanticMemoryStrategy": {
-                    "name": "FactExtractor",
-                    "namespaceTemplates": ["/facts/{actorId}/"],
-                }
-            },
-        ],
+        # No long-term strategies, deliberately. Each one the service offers
+        # (summary, preference, semantic) runs LLM extraction against every
+        # event — an ongoing per-event cost — and nothing in either stage reads
+        # the records a strategy would produce: the stage-1 checkpointer and
+        # the stage-2 session manager both ride the raw event stream, and no
+        # retrieval_config is ever set. create_memory_and_wait requires the
+        # argument, so the empty list is spelled out rather than omitted.
+        strategies=[],
     )
     memory_id = memory["id"]
     print(f"Memory created: {memory_id} (events expire after {event_expiry_days} days)")

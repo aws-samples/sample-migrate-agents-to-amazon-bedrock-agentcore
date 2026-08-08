@@ -71,7 +71,7 @@ examples/
 │       ├── lambda_function.py      # Lambda handler backing the gateway target
 │       └── deploy.sh               # Create the execution roles and function from scratch
 ├── memory/
-│   └── configure_memory.py         # Set up AgentCore Memory (summary, preference, semantic)
+│   └── configure_memory.py         # Set up AgentCore Memory (raw events only, no strategies)
 ├── tools/
 │   └── gateway_mcp_tools.py        # Connect to a gateway as MCP tools (SigV4-signed)
 └── validation/
