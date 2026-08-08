@@ -117,6 +117,11 @@ Not all of these are needed at once, and the order below is the order they start
 - The [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), needed
   by one script only: `examples/gateway/lambda_target/deploy.sh`. Everything else uses boto3 from the
   virtual environment.
+- Agents hosted on AgentCore Runtime are instrumented automatically — no OpenTelemetry package, no
+  `OTEL_*` environment variables — but viewing their spans and traces has a one-time per-account
+  prerequisite: enable
+  [CloudWatch Transaction Search](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-get-started.html),
+  or the traces the stage-1 diagram shows cannot be seen at all.
 
 ## Getting started
 
