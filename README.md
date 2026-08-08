@@ -6,11 +6,24 @@ This repository contains sample code for the AWS blog post "Migrating agentic wo
 
 ## Architecture
 
-Three ways to migrate, and how much of the layer underneath the agent each one stops costing you:
+One migration, read as a ladder of descending ownership — a recommended order, not a menu and not
+a mandatory chain. Two things move independently along it: how much of the layer underneath the
+agent you operate, and whose code plans the next step. Rung 0, self-hosted LangGraph: all ten
+operational burdens in the matrix are yours, and your `route_intent` plans. Rung 1, replatform:
+three of the ten stay yours, and your code still plans. Rung 2, rebuild: the same three stay
+yours — ownership does not change — but the model now plans instead of your router. Rung 3,
+handing the loop to the AgentCore harness: one stays yours, the model plans, and it is not
+demonstrated in this sample:
 
 ![Comparison matrix titled "The same agent. Less of it is yours to operate." Subtitle: three alternatives, choose who owns the orchestration loop. A band across the top names the baseline, self-hosted LangGraph, and states that one agent's purpose stays constant across all three paths: classify, route, escalate, three tools. An Amazon Bedrock AgentCore icon labels the section beneath it. Ten operational burdens run down the left column: VPC, WAF, IAM policies, secrets rotation, OS patching, dependency updates, auto-scaling rules, session isolation, checkpoint storage, and tool auth. Three columns then give each path's outcome for every burden. Replatform, marked shipped, adopts AgentCore Runtime, Gateway and Memory and reports seven transferred and three remaining. Rebuild, also marked shipped, changes the loop to model-driven planning and reports the same seven transferred and three remaining. In both, the seven transferred to AWS are VPC, WAF, OS patching, auto-scaling rules, session isolation, checkpoint storage and tool auth, and the three still yours are IAM policies, secrets rotation and dependency updates. The third column, handing the loop over to AgentCore, is marked not in this sample and per AWS docs, and reports nine transferred and one remaining: every burden shows a filled circle except IAM policies, which stays a filled square. A legend defines the two marks: a filled circle for transferred to AgentCore, and a filled square for still yours to operate.](images/agentcore-migration-architecture.png)
 
-This repository ships the first two. Stage 1 replatforms the runtime and leaves the graph alone:
+This repository ships rungs 1 and 2. The order is recommended because rung 1 validates the move
+while your logic is unchanged — the same graph, router and prompts answer on AgentCore Runtime,
+which separates the infrastructure variable from the behaviour variable. Entering at rung 2 is
+how a team already committed to a rewrite uses this: `--stage 2` stands up the same gateway,
+target and memory itself — steps 1 to 3 of the [run order](#run-order) run for either stage, and
+none of them needs the stage-1 agent — and what that team skips is the entry-point diff and the
+before-and-after parity validation. Stage 1 replatforms the runtime and leaves the graph alone:
 
 ![Architecture diagram titled "Stage 1: replatform the runtime." Subtitle: direct invocation, unchanged orchestration, partial tool migration. A band across the top, marked deploy time and not request path, traces source plus vendored dependencies as a zip, into Amazon S3 as agent.zip, into a CreateAgentRuntime call whose codeConfiguration points back at S3, ending at Runtime deployed; there is no container and no Amazon ECR anywhere along it. Below that, a band marked request path starts at a client application card that calls InvokeAgentRuntime with a runtimeSessionId of at least 33 characters and is marked direct call. One arrow runs from it straight into the Amazon Bedrock AgentCore Runtime card, described as serverless with one microVM per session, with no load balancer and no API Gateway in between. Inside the Runtime card, three boxes stack down the page. First, agent_runtime.py, holding BedrockAgentCoreApp with an @app.entrypoint function and mapping RequestContext.session_id to thread_id. Second, the LangGraph graph, marked imported, not rewritten, built by build_graph from stage 0, and noted as the same graph calling all three tools. Third, the tools, split in two: a box outlined in the accent color and marked local Python holds search_faq and states it stays in Runtime, while a box marked gateway-served holds supportTools___lookup_order and supportTools___process_return, so two of the three tools are served by Gateway and one is not. Four service cards sit down the right side. Amazon Bedrock, using ChatBedrockConverse, is marked did not move and already Bedrock. AgentCore Memory, reached from Runtime, is keyed on session_id plus actor_id and annotated as a custom 114-line saver. AgentCore Gateway speaks MCP over SigV4-signed calls with an AWS_IAM authorizer, and is reached from the gateway-served tool box. AWS Lambda is the Gateway target, receiving arguments as the raw event and the tool name in the client context. Along the bottom, an observability card carries the Amazon CloudWatch and AWS Distro for OpenTelemetry icons and reports Runtime logs, metrics, and traces. Beside it, an AgentCore Policy card is marked stage 2, not created in stage 1, and describes Cedar rules evaluated at Gateway on each tool call in the data plane, joined to Gateway by a dashed line. A footer line reads: stage 1 replatformed runtime, no load balancer, no API Gateway, no container, no Amazon ECR.](images/agentcore-replatform-architecture.png)
 
@@ -20,8 +33,8 @@ Stage 2 rebuilds the loop, for when the hand-written router is the thing holding
 
 ## Overview
 
-One LangGraph customer-support agent goes through all three stages, so each migration path is a
-diff against the same starting point rather than a separate demo:
+One LangGraph customer-support agent goes through all three stages, so each rung is a diff
+against the same starting point rather than a separate demo:
 
 - **Stage 0, the agent you already have** (`examples/stage0_langgraph/`): a compiled `StateGraph`,
   a hand-written escalation router, three tools over HTTP, an in-process checkpointer. No AgentCore
@@ -35,8 +48,8 @@ diff against the same starting point rather than a separate demo:
   [Strands Agents SDK](https://github.com/strands-agents/harness-sdk). The router gives way to a
   model-driven loop, and Cedar rules in Policy in AgentCore sit over the gateway's tool calls.
 
-The post describes a third path, handing the orchestration loop to the AgentCore harness. There is no
-sample code for it here. `examples/validation/verify_diff_claim.py` measures the stage 0 → stage 1
+The post describes the final rung, handing the orchestration loop to the AgentCore harness. There is
+no sample code for it here. `examples/validation/verify_diff_claim.py` measures the stage 0 → stage 1
 cost from the files on disk rather than asserting it, so you can re-check the post's numbers.
 
 ## Repository structure
@@ -233,9 +246,11 @@ because the Runtime deploy is part of it**: an AgentCore Runtime
 which the service creates on the runtime's first log line. `--teardown` deletes all
 four.
 
-`--stage 2` rebuilds the agent on Strands and hardens it, reusing the gateway,
-target and memory from stage 1 (not its runtime), and so needing the same two
-ARNs. Stage 2 creates a Cedar policy engine of its own, and `--teardown` deletes
+`--stage 2` rebuilds the agent on Strands and hardens it. It needs the same two
+ARNs because it stands on the same foundation: the gateway, target and memory
+are created by steps 1 to 3 whichever stage runs, so on a clean account
+`--stage 2` builds them itself, and after a stage-1 run it reuses stage 1's
+(never its runtime). Stage 2 creates a Cedar policy engine of its own, and `--teardown` deletes
 it. The rebuilt agent also has its own Runtime entry point at
 `examples/stage2_rebuild/strands_agent.py`.
 
