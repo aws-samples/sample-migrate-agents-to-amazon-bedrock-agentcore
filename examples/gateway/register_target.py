@@ -24,12 +24,16 @@ from typing import Optional
 
 import boto3
 
-# Tool definitions published to MCP clients through the gateway. These match the
-# lookup_order / process_return tools in examples/stage2_rebuild/strands_agent.py.
+# Tool definitions published to MCP clients through the gateway. The descriptions
+# carry stage 0's tool docstrings (examples/stage0_langgraph/tools.py) rather than
+# the terser stage-2 ones: a gateway tool supersedes the local stub of the same
+# name at request time, so this description is the prompt the model actually
+# reads, and superseding must not make it poorer. The parameter shapes match the
+# same-named tools in every stage.
 TOOL_SCHEMA = [
     {
         "name": "lookup_order",
-        "description": "Look up order status by order ID.",
+        "description": "Look up the status, carrier and tracking number of an order by its ID.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -43,7 +47,7 @@ TOOL_SCHEMA = [
     },
     {
         "name": "process_return",
-        "description": "Initiate a return for an order.",
+        "description": "Initiate a return for an order, given the order ID and the reason.",
         "inputSchema": {
             "type": "object",
             "properties": {
