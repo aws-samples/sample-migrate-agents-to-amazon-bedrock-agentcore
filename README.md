@@ -92,8 +92,12 @@ tests/                              # Offline suite; fakes for Bedrock, MCP, Mem
 
 Not all of these are needed at once, and the order below is the order they start to matter:
 
-- Python 3.10 or later, and a clone. That is the whole of what steps 1 to 3 need, because the test
-  suite runs offline, with no AWS account.
+- Python 3.12, and a clone. That is the whole of what steps 1 to 3 need, because the test
+  suite runs offline, with no AWS account. `setup.sh` accepts any Python from 3.10, and the offline
+  steps run on it; 3.12 is the version everything else here names — `.python-version`, the
+  `Dockerfile`, and the `PYTHON_3_12` runtime the deploy creates. The pair that has to match is the
+  vendored wheels and that named runtime, not your local interpreter — `deploy_runtime.py` pins
+  both sides of it — so running 3.12 locally just means one version everywhere.
 - An [AWS account](https://aws.amazon.com/free/) with [Amazon Bedrock](https://aws.amazon.com/bedrock/)
   model access enabled, and credentials. Needed from step 4 onwards, which is the first step that calls
   AWS.
