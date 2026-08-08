@@ -28,6 +28,7 @@ import importlib
 import inspect
 import io
 import os
+import socket
 import unittest
 import unittest.mock
 
@@ -42,6 +43,7 @@ from examples import run_walkthrough
 from examples.gateway import register_target
 from examples.memory import configure_memory as configure_memory_module
 from examples.memory.configure_memory import MEMORY_NAME
+from examples.stage0_langgraph.local_api import running_stub
 from examples.stage0_langgraph.tools import SUPPORT_TOOLS
 from examples.stage2_rebuild.policy import attach_policy
 from examples.stage2_rebuild.policy.attach_policy import (
@@ -140,6 +142,59 @@ class BuildAgentTest(unittest.TestCase):
         # Stage 1's assertion, restated on the moved module.
         with self.assertRaises(ValueError):
             build_agent(memory_id="mem-1")
+
+
+class LocalToolErrorContractTest(unittest.TestCase):
+    """Stage 0's tool-error contract, on the rebuilt local stubs.
+
+    search_faq never moves to the gateway, so its local body is the one serving
+    FAQ answers in stage 2 — and the walkthrough's stage-2 turn asks an order
+    question, which the gateway tools supersede, so no live run exercises it.
+    The contract under test is the one stage 0's module docstring states: an
+    unreachable backend comes back as an {"error": ...} payload the model can
+    read and react to, never as an exception, and ORDERS_API_BASE points the
+    tools at a real local backend.
+    """
+
+    def setUp(self):
+        previous = os.environ.get("ORDERS_API_BASE")
+        self.addCleanup(self._restore_base_url, previous)
+
+    def _restore_base_url(self, previous):
+        if previous is None:
+            os.environ.pop("ORDERS_API_BASE", None)
+        else:
+            os.environ["ORDERS_API_BASE"] = previous
+
+    @staticmethod
+    def _unreachable_base_url():
+        # Bind an ephemeral port, then close it: connecting is refused
+        # immediately, with no DNS lookup, so the test stays offline and does
+        # not sit out the 30-second timeout.
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+    def test_an_unreachable_backend_is_an_error_payload_not_an_exception(self):
+        os.environ["ORDERS_API_BASE"] = self._unreachable_base_url()
+        calls = {
+            "search_faq": lambda: strands_agent.search_faq("What is your return policy?"),
+            "lookup_order": lambda: strands_agent.lookup_order("12345"),
+            "process_return": lambda: strands_agent.process_return("12345", "defective"),
+        }
+        for name, call in calls.items():
+            with self.subTest(tool=name):
+                payload = call()
+                self.assertIn("error", payload)
+
+    def test_orders_api_base_points_the_rebuilt_tools_at_the_local_stub(self):
+        # The same stub stage 0 documents, so a reader who followed stage 0's
+        # local_api.py instructions gets working stage-2 tools too.
+        with running_stub() as base_url:
+            os.environ["ORDERS_API_BASE"] = base_url
+            answer = strands_agent.search_faq("What is your return policy?")
+        self.assertEqual(answer["article_id"], "FAQ-RETURNS-001")
+        self.assertNotIn("error", answer)
 
 
 class PartialVisibilityTest(unittest.TestCase):

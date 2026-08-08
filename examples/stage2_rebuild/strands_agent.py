@@ -18,37 +18,51 @@ from strands.tools import tool
 MODEL_ID = "us.anthropic.claude-sonnet-5"
 SYSTEM_PROMPT = "You are a customer support assistant for ExampleCorp."
 
+TIMEOUT_SECONDS = 30
+
 app = BedrockAgentCoreApp()
+
+
+def _base_url() -> str:
+    # Read at call time, not import time, so a caller can point the tools at a
+    # local stub after this module is imported.
+    return os.environ.get("ORDERS_API_BASE", "https://api.example.com").rstrip("/")
+
+
+def _request(method: str, path: str, **kwargs) -> dict:
+    # Stage 0's error contract (stage0_langgraph/tools.py), kept through the
+    # rebuild: a failed call returns an {"error": ...} payload the model can
+    # read and react to. Strands would catch a raise rather than crash, but the
+    # model would see a traceback string instead of the payload the same
+    # backend failure produces in stages 0 and 1 — search_faq never moves to
+    # the gateway, so this local body is the one serving FAQ answers in
+    # production, not a placeholder.
+    try:
+        response = requests.request(
+            method, f"{_base_url()}{path}", timeout=TIMEOUT_SECONDS, **kwargs
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        return {"error": f"{method} {path} failed: {exc}"}
 
 
 @tool
 def lookup_order(order_id: str) -> dict:
     """Look up order status by order ID."""
-    response = requests.get(f"https://api.example.com/orders/{order_id}", timeout=30)
-    response.raise_for_status()
-    return response.json()
+    return _request("GET", f"/orders/{order_id}")
 
 
 @tool
 def process_return(order_id: str, reason: str) -> dict:
     """Initiate a return for an order."""
-    response = requests.post(
-        "https://api.example.com/returns",
-        json={"order_id": order_id, "reason": reason},
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()
+    return _request("POST", "/returns", json={"order_id": order_id, "reason": reason})
 
 
 @tool
 def search_faq(query: str) -> dict:
     """Search the support knowledge base for a policy or FAQ answer."""
-    response = requests.get(
-        "https://api.example.com/faq/search", params={"q": query}, timeout=30
-    )
-    response.raise_for_status()
-    return response.json()
+    return _request("GET", "/faq/search", params={"q": query})
 
 
 def build_agent(
