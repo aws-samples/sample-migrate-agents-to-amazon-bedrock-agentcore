@@ -6,34 +6,34 @@ This repository contains sample code for the AWS blog post "Migrating agentic wo
 
 ## Architecture
 
-One migration, read as a ladder of descending ownership — a recommended order, not a menu and not
-a mandatory chain. Two things move independently along it: how much of the layer underneath the
-agent you operate, and whose code plans the next step. Rung 0, self-hosted LangGraph: all ten
-operational burdens in the matrix are yours, and your `route_intent` plans. Rung 1, replatform:
-three of the ten stay yours, and your code still plans. Rung 2, rebuild: the same three stay
-yours — ownership does not change — but the model now plans instead of your router. Rung 3,
-handing the loop to the AgentCore harness: one stays yours, the model plans, and it is not
-demonstrated in this sample:
+One migration, read as a ladder of descending ownership. It's a recommended order rather than a
+menu, and nothing forces you down the whole chain. Two things move independently along it. One is
+how much of the layer underneath the agent you operate. The other is whose code plans the next
+step. At stage 0, self-hosted LangGraph, all ten operational burdens in the matrix are yours and
+your `route_intent` plans. Stage 1 replatforms, and three of the ten stay yours while your code
+still plans. Stage 2 rebuilds. The same three stay yours, because ownership does not change, but
+the model now plans instead of your router. Stage 3 hands the loop to the AgentCore harness, where
+one stays yours and the model plans. That last one isn't demonstrated in this sample:
 
-![Comparison matrix titled "The same agent. Less of it is yours to operate." Subtitle: three alternatives, choose who owns the orchestration loop. A band across the top names the baseline, self-hosted LangGraph, and states that one agent's purpose stays constant across all three paths: classify, route, escalate, three tools. An Amazon Bedrock AgentCore icon labels the section beneath it. Ten operational burdens run down the left column: VPC, WAF, IAM policies, secrets rotation, OS patching, dependency updates, auto-scaling rules, session isolation, checkpoint storage, and tool auth. Three columns then give each path's outcome for every burden. Replatform, marked shipped, adopts AgentCore Runtime, Gateway and Memory and reports seven transferred and three remaining. Rebuild, also marked shipped, changes the loop to model-driven planning and reports the same seven transferred and three remaining. In both, the seven transferred to AWS are VPC, WAF, OS patching, auto-scaling rules, session isolation, checkpoint storage and tool auth, and the three still yours are IAM policies, secrets rotation and dependency updates. The third column, handing the loop over to AgentCore, is marked not in this sample and per AWS docs, and reports nine transferred and one remaining: every burden shows a filled circle except IAM policies, which stays a filled square. A legend defines the two marks: a filled circle for transferred to AgentCore, and a filled square for still yours to operate.](images/agentcore-migration-architecture.png)
+![Comparison matrix titled "Migrating the sample LangGraph agent to AgentCore, stage by stage." A subtitle states that each stage is measured for what we stopped operating and who plans the next step, and a note beneath it adds that one variable moved at a time: stage 1 moved where the agent ran, stage 2 moved how it planned. A band across the top, marked unchanged at every stage, holds the agent itself: classify, route, escalate, three tools. Four numbered stage columns are grouped under three headings. Where we started holds stage 0, self-hosted LangGraph on compute we ran and patched, marked baseline, reporting ten still ours. What this post builds, labelled with an Amazon Bedrock AgentCore icon, holds two highlighted columns: stage 1, replatform, adopting Runtime, Gateway and Memory, marked walked in this post, reporting seven moved and three still ours; and stage 2, rebuild, where the loop becomes model-driven planning, also marked walked in this post, reporting the same seven moved and three still ours. Beyond this post holds stage 3, hand the loop over, where AgentCore runs it, marked documented only, reporting nine moved and one still ours. A row labelled who planned the next step reads our code at stage 0, our code at stage 1, the model at stage 2, and the model at stage 3. A row labelled what moves at this stage reads: nothing moved yet at stage 0, all ten ours, our router planned; seven moved to AWS at stage 1, the same three still ours, our router still planned; nothing operational moved at stage 2, the same three still ours, the model took over planning, and stage 2 runs standalone; two more would move at stage 3, secrets and dependencies, not built here. Ten operational burdens then run down the left as rows: VPC, WAF, IAM policies, secrets rotation, OS patching, dependency updates, auto-scaling rules, session isolation, checkpoint storage, and tool auth. Stage 0 shows a filled square on all ten. Stages 1 and 2 are identical to each other: filled circles on VPC, WAF, OS patching, auto-scaling rules, session isolation, checkpoint storage and tool auth, and filled squares on IAM policies, secrets rotation and dependency updates. Stage 3 shows filled circles on nine, with IAM policies the only square left. A legend defines the two marks: a filled circle for moved to AgentCore, and a filled square for still ours to operate. A footer reads that the counts are measured from the committed sample, not asserted.](images/agentcore-migration-architecture.png)
 
-This repository ships rungs 1 and 2. The order is recommended because rung 1 validates the move
-while your logic is unchanged — the same graph, router and prompts answer on AgentCore Runtime,
-which separates the infrastructure variable from the behaviour variable. Entering at rung 2 is
-how a team already committed to a rewrite uses this: `--stage 2` stands up the same gateway,
-target and memory itself — steps 1 to 3 of the [run order](#run-order) run for either stage, and
-none of them needs the stage-1 agent — and what that team skips is the entry-point diff and the
+This repository ships stages 1 and 2. The order is recommended because stage 1 validates the move
+while your logic is unchanged. The same graph, router and prompts answer on AgentCore Runtime,
+which separates the infrastructure variable from the behaviour variable. Entering at stage 2 is
+how a team already committed to a rewrite uses this. `--stage 2` stands up the same gateway, target
+and memory itself, because steps 1 to 3 of the [run order](#run-order) run for either stage and
+none of them needs the stage-1 agent. What that team skips is the entry-point diff and the
 before-and-after parity validation. Stage 1 replatforms the runtime and leaves the graph alone:
 
-![Architecture diagram titled "Stage 1: replatform the runtime." Subtitle: direct invocation, unchanged orchestration, partial tool migration. A band across the top, marked deploy time and not request path, traces source plus vendored dependencies as a zip, into Amazon S3 as agent.zip, into a CreateAgentRuntime call whose codeConfiguration points back at S3, ending at Runtime deployed; there is no container and no Amazon ECR anywhere along it. Below that, a band marked request path starts at a client application card that calls InvokeAgentRuntime with a runtimeSessionId of at least 33 characters and is marked direct call. One arrow runs from it straight into the Amazon Bedrock AgentCore Runtime card, described as serverless with one microVM per session, with no load balancer and no API Gateway in between. Inside the Runtime card, three boxes stack down the page. First, agent_runtime.py, holding BedrockAgentCoreApp with an @app.entrypoint function and mapping RequestContext.session_id to thread_id. Second, the LangGraph graph, marked imported, not rewritten, built by build_graph from stage 0, and noted as the same graph calling all three tools. Third, the tools, split in two: a box outlined in the accent color and marked local Python holds search_faq and states it stays in Runtime, while a box marked gateway-served holds supportTools___lookup_order and supportTools___process_return, so two of the three tools are served by Gateway and one is not. Four service cards sit down the right side. Amazon Bedrock, using ChatBedrockConverse, is marked did not move and already Bedrock. AgentCore Memory, reached from Runtime, is keyed on session_id plus actor_id and annotated as a custom 114-line saver. AgentCore Gateway speaks MCP over SigV4-signed calls with an AWS_IAM authorizer, and is reached from the gateway-served tool box. AWS Lambda is the Gateway target, receiving arguments as the raw event and the tool name in the client context. Along the bottom, an observability card carries the Amazon CloudWatch and AWS Distro for OpenTelemetry icons and reports Runtime logs, metrics, and traces. Beside it, an AgentCore Policy card is marked stage 2, not created in stage 1, and describes Cedar rules evaluated at Gateway on each tool call in the data plane, joined to Gateway by a dashed line. A footer line reads: stage 1 replatformed runtime, no load balancer, no API Gateway, no container, no Amazon ECR.](images/agentcore-replatform-architecture.png)
+![Architecture diagram titled "Stage 1: replatform the runtime." Subtitle: direct invocation, unchanged orchestration, partial tool migration. A band across the top, marked deploy time and not request path, traces source plus vendored dependencies as a zip, into Amazon S3 as agent.zip, into a CreateAgentRuntime call whose codeConfiguration points back at S3, ending at Runtime deployed; there is no container and no Amazon ECR anywhere along it. Below that, a band marked request path starts at a client application card that calls InvokeAgentRuntime with a runtimeSessionId of at least 33 characters and is marked direct call. One arrow runs from it straight into the Amazon Bedrock AgentCore Runtime card, described as serverless with one microVM per session, with no load balancer and no API Gateway in between. Inside the Runtime card, three boxes stack down the page. First, agent_runtime.py, holding BedrockAgentCoreApp with an @app.entrypoint function and mapping RequestContext.session_id to thread_id. Second, the LangGraph graph, marked imported, not rewritten, built by build_graph from stage 0, and noted as the same graph calling all three tools. Third, the tools, split in two: a box outlined in the accent color and marked local Python holds search_faq and states it stays in Runtime, while a box marked gateway-served holds supportTools___lookup_order and supportTools___process_return, so two of the three tools are served by Gateway and one is not. Four service cards sit down the right side. Amazon Bedrock, using ChatBedrockConverse, is marked did not move and already Bedrock. AgentCore Memory, reached from Runtime, is annotated AgentCoreMemorySaver, a first-party saver from langgraph-checkpoint-aws. AgentCore Gateway speaks MCP over SigV4-signed calls with an AWS_IAM authorizer, and is reached from the gateway-served tool box. AWS Lambda is the Gateway target, receiving arguments as the raw event and the tool name in the client context. Along the bottom, an observability card carries the Amazon CloudWatch and AWS Distro for OpenTelemetry icons and reports Runtime logs, metrics, and traces. Beside it, an AgentCore Policy card marked attaches to this gateway is noted as demonstrated at stage 2 and describes Cedar on each tool call in the data plane, joined to Gateway by a dashed line. A line above the footer records that stage 1 was validated by re-running the stage 0 baseline over the same three turns and comparing the tools that ran and the final state, and states that IAM policies, secrets rotation and dependency updates are still ours. A footer line reads: stage 1 replatformed runtime, no load balancer, no API Gateway, no container, no Amazon ECR.](images/agentcore-replatform-architecture.png)
 
 Stage 2 rebuilds the loop, for when the hand-written router is the thing holding you back:
 
-![Architecture diagram titled "Stage 2: rebuild the loop." Subtitle: model-driven planning, SDK-shipped memory wiring, Cedar on every tool call. The upper half, headed what the rebuild changes, holds two cards. The first, marked the loop, rebuilt, shows a Strands Agent running strands_agent.py on AgentCore Runtime, with model-driven planning rather than a router, no route_intent and no add_conditional_edges, and a note that what is lost is a deterministic, auditable branch. The second, marked memory wiring, SDK-shipped, shows AgentCore Memory reusing stage 1's store via AgentCoreMemoryConfig and AgentCoreMemorySessionManager, noting that for LangGraph stage 1 wrote its own. The lower half, headed the proof, Cedar in the data plane, holds AgentCore Policy described as two callers times two tools, evaluated at the Gateway in the data plane on every tool call, with a note that two by two is the smallest experiment that attributes a refusal because one refused call looks like missing IAM. A two by two table follows: a read-only role is allowed supportTools___lookup_order but denied supportTools___process_return for no matching permit, and a support-agent role is allowed both. Two lines state that no forbid rule exists anywhere because Cedar is default-deny, so the refusal is the absence of a permit, and that both roles' IAM policies are identical, so the one refusal is provably Cedar's. A final band marked reused from stage 1, not recreated shows AgentCore Gateway with its AWS_IAM authorizer, AWS Lambda as an unchanged target, and Amazon Bedrock as the same model in every stage, adding that the Memory store is also stage 1's, the two Gateway tools supersede the same-named local stubs, search_faq stays local as in every stage, and deploy uses the same zip path as stage 1. A footer notes that AWS_IAM principals carry an ARN and no tags, so the rules scope tools to callers and nothing finer.](images/agentcore-rebuild-architecture.png)
+![Architecture diagram titled "Stage 2: rebuild the loop." Subtitle: model-driven planning, SDK-shipped memory wiring, Cedar on every tool call. The upper half, headed what the rebuild changes, holds two cards. The first, marked the loop, rebuilt, shows a Strands Agent running strands_agent.py on AgentCore Runtime, with model-driven planning rather than a router, no route_intent and no add_conditional_edges, and a note that what is lost is a deterministic, auditable branch. The second, marked memory wiring, SDK-shipped, shows AgentCore Memory reusing stage 1's store, with the SDK session manager named as AgentCoreMemorySessionManager. The lower half, headed the proof, Cedar in the data plane, holds AgentCore Policy described as two callers times two tools, evaluated at the Gateway in the data plane on every tool call, with a note that two by two is the smallest experiment that attributes a refusal because one refused call looks like missing IAM. A two by two table follows: a read-only role is allowed supportTools___lookup_order but denied supportTools___process_return for no matching permit, and a support-agent role is allowed both. Two lines state that no forbid rule exists anywhere because Cedar is default-deny, so the refusal is the absence of a permit, and that both roles' IAM policies are identical, so the one refusal is provably Cedar's. A dashed arrow leads down to a final band whose label lists what is reused, the Gateway, the target and Memory but not the stage 1 runtime, and notes that walkthrough steps 1 to 3 build them for either stage; the band shows AgentCore Gateway with its AWS_IAM authorizer, AWS Lambda as an unchanged target, and Amazon Bedrock as the same model in every stage, adding that the Memory store is also stage 1's, the two Gateway tools supersede the same-named local stubs, search_faq stays local as in every stage, and deploy uses the same zip path as stage 1. One footer line states that ownership is unchanged, IAM policies, secrets rotation and dependency updates, and that what changed is who plans. A second footer line notes that AWS_IAM principals carry an ARN and no tags, so the rules scope tools to callers and nothing finer.](images/agentcore-rebuild-architecture.png)
 
 ## Overview
 
-One LangGraph customer-support agent goes through all three stages, so each rung is a diff
+One LangGraph customer-support agent goes through all three stages, so each stage is a diff
 against the same starting point rather than a separate demo:
 
 - **Stage 0, the agent you already have** (`examples/stage0_langgraph/`): a compiled `StateGraph`,
@@ -42,13 +42,13 @@ against the same starting point rather than a separate demo:
 - **Stage 1, replatform** (`examples/stage1_replatform/`): keep the agent, replace what surrounds
   it. Graph, router, prompts and tool bodies are imported unchanged. Runtime hosts the process,
   Gateway fronts two of the three tools, and AgentCore Memory holds the conversation state.
-  `deploy_runtime.py` is what puts it there: a zip in Amazon S3, with pip as the only build tool.
+  `deploy_runtime.py` is what puts it there, as a zip in Amazon S3, with pip as the only build tool.
   See [Deploying to Runtime](#deploying-to-runtime).
 - **Stage 2, rebuild** (`examples/stage2_rebuild/`): the same agent on the
   [Strands Agents SDK](https://github.com/strands-agents/harness-sdk). The router gives way to a
   model-driven loop, and Cedar rules in Policy in AgentCore sit over the gateway's tool calls.
 
-The post describes the final rung, handing the orchestration loop to the AgentCore harness. There is
+The post describes the final stage, handing the orchestration loop to the AgentCore harness. There is
 no sample code for it here. `examples/validation/verify_diff_claim.py` measures the stage 0 → stage 1
 cost from the files on disk rather than asserting it, so you can re-check the post's numbers.
 
@@ -106,20 +106,20 @@ tests/                              # Offline suite; fakes for Bedrock, MCP, Mem
 Not all of these are needed at once, and the order below is the order they start to matter:
 
 - Python 3.12, and a clone. That is the whole of what steps 1 to 3 need, because the test
-  suite runs offline, with no AWS account. `setup.sh` accepts any Python from 3.10, and the offline
-  steps run on it; 3.12 is the version everything else here names — `.python-version`, the
-  `Dockerfile`, and the `PYTHON_3_12` runtime the deploy creates. The pair that has to match is the
-  vendored wheels and that named runtime, not your local interpreter — `deploy_runtime.py` pins
-  both sides of it — so running 3.12 locally just means one version everywhere.
+  suite runs offline, with no AWS account. `setup.sh` accepts any Python from 3.10 and the offline
+  steps run on it. 3.12 is the version everything else here names, in `.python-version`, in the
+  `Dockerfile`, and in the `PYTHON_3_12` runtime the deploy creates. The pair that has to match is
+  the vendored wheels and that named runtime, not your local interpreter, and `deploy_runtime.py`
+  pins both sides of it. So running 3.12 locally just means one version everywhere.
 - An [AWS account](https://aws.amazon.com/free/) with [Amazon Bedrock](https://aws.amazon.com/bedrock/)
   model access enabled, and credentials. Needed from step 4 onwards, which is the first step that calls
   AWS.
 - The [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html), needed
   by one script only: `examples/gateway/lambda_target/deploy.sh`. Everything else uses boto3 from the
   virtual environment.
-- Agents hosted on AgentCore Runtime are instrumented automatically — no OpenTelemetry package, no
-  `OTEL_*` environment variables — but viewing their spans and traces has a one-time per-account
-  prerequisite: enable
+- AgentCore Runtime instruments the agents it hosts for you. No OpenTelemetry package, no `OTEL_*`
+  environment variables. Viewing their spans and traces does have a one-time per-account
+  prerequisite, so enable
   [CloudWatch Transaction Search](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-get-started.html),
   or the traces the stage-1 diagram shows cannot be seen at all.
 
@@ -149,7 +149,7 @@ pip install -r requirements.txt
 ```
 
 3. Run the test suite. **No credentials, and it creates nothing.** The chat model, the gateway, the
-   memory service and the Cedar evaluator are faked; everything else is real:
+   memory service and the Cedar evaluator are faked. Everything else is real:
 
 ```bash
 source .venv/bin/activate
@@ -157,7 +157,7 @@ python -m unittest discover -s tests -v
 ```
 
 The suite is `unittest`, and that command needs nothing beyond `requirements.txt`. `pytest tests/ -q`
-runs it too and prints less, but pytest is not a declared dependency, so `./setup.sh` does not install
+runs it too and prints less, but pytest isn't a declared dependency, so `./setup.sh` does not install
 it.
 
 4. Run the stage-0 agent. This is the agent before any migration, and the last step that creates
@@ -173,7 +173,7 @@ python -m examples.stage0_langgraph.run_local
 ```
 
 It holds two turns on one `thread_id` and answers the second without being told the order number
-again. You are watching the in-process checkpointer. A third turn then escalates without reaching
+again. You're watching the in-process checkpointer. A third turn then escalates without reaching
 the model's tool loop.
 
 5. Then work through [Run order](#run-order) for the migration itself. **Everything from here creates
@@ -252,7 +252,7 @@ which the service creates on the runtime's first log line. `--teardown` deletes 
 four.
 
 `--stage 2` rebuilds the agent on Strands and hardens it. It needs the same two
-ARNs because it stands on the same foundation: the gateway, target and memory
+ARNs because it stands on the same foundation. The gateway, target and memory
 are created by steps 1 to 3 whichever stage runs, so on a clean account
 `--stage 2` builds them itself, and after a stage-1 run it reuses stage 1's
 (never its runtime). Stage 2 creates a Cedar policy engine of its own, and `--teardown` deletes
@@ -282,10 +282,10 @@ python -m examples.stage1_replatform.deploy_runtime \
   --memory-id MigratedAgentMemory-xxxx
 ```
 
-`agent_runtime.py` is deployed unmodified; the gateway URL and memory id reach it as Runtime
+`agent_runtime.py` is deployed unmodified. The gateway URL and memory id reach it as Runtime
 environment variables. `--stage 1` of the walkthrough runs this for you.
 
-Two things about the zip are not obvious, and each costs a failed deploy to learn:
+Two things about the zip aren't obvious, and each costs a failed deploy to learn:
 
 - **Cross-compile the dependencies.** Runtime is ARM64, so a plain `pip install --target` on macOS
   or an x86 machine produces the wrong binaries and the deploy fails with a message about
@@ -293,11 +293,11 @@ Two things about the zip are not obvious, and each costs a failed deploy to lear
   `--platform manylinux2014_aarch64 --python-version 3.12 --only-binary=:all:`. Those are pip flags, not
   a container. The version has to match the runtime the deploy names, and omitting it vendors wheels for
   whichever interpreter you happen to be running.
-- **A `requirements.txt` inside the zip is inert.** Nothing installs it; the dependencies have to be
-  vendored into the archive. **The error message for getting this wrong points away from the
+- **A `requirements.txt` inside the zip is inert.** Nothing installs it, and the dependencies have
+  to be vendored into the archive. **The error message for getting this wrong points away from the
   cause:** a missing module surfaces as `Runtime initialization time exceeded ... initialization
   completes in 30s`, a timeout message for an `ImportError`, with the real reason visible only in
-  CloudWatch. Vendor the dependency; do not tune the timeout.
+  CloudWatch. Vendor the dependency. Do not tune the timeout.
 
 `deploy_runtime.py` does both of these, and its error paths name the cause and the fix rather than
 repeating the service's message.
@@ -311,7 +311,7 @@ repeating the service's message.
 
 If you created AWS resources while following the examples, delete them to avoid ongoing charges.
 
-Passing `--teardown` to `examples/run_walkthrough.py` deletes what the walkthrough created, in the order the dependencies require: the agent runtime first, then the gateway target, then the gateway once target deletion has finished, then the memory resource, then the Cedar policies and the policy engine holding them, then the two demo IAM roles stage 2 creates. Last come the three things the runtime leaves behind: its artifact bucket, its execution role and its log group.
+Passing `--teardown` to `examples/run_walkthrough.py` deletes what the walkthrough created, in the order the dependencies require. The agent runtime goes first, then the gateway target, then the gateway once target deletion has finished. Then the memory resource, then the Cedar policies and the policy engine holding them, then the two demo IAM roles stage 2 creates. Last come the three things the runtime leaves behind: its artifact bucket, its execution role and its log group.
 
 Deleting a gateway that still has a target attached returns `ValidationException`, and it does so for a while after `ListGatewayTargets` already returns nothing, so the teardown retries the delete and confirms completion with `GetGateway`. The runtime goes first and the bucket and role go last because the runtime holds a reference to the zip and assumes the role. The log group is last of all: deleting it while the runtime is still alive only means its next log line recreates it.
 
@@ -330,7 +330,7 @@ To remove resources by hand, search on the names the scripts use:
    - the agent runtime `MigratedAgentRuntime`, in the [Amazon Bedrock AgentCore console](https://console.aws.amazon.com/bedrock/) or with `DeleteAgentRuntime`;
    - the S3 bucket `migrated-agent-runtime-<account-id>`, which holds `agent.zip` and has to be emptied before it will delete;
    - the IAM role `MigratedAgentRuntimeRole`, whose inline `RuntimeExecution` policy has to go first;
-   - the CloudWatch log group `/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT`, which `DeleteAgentRuntime` does not remove. Copy the runtime id before deleting the runtime: afterwards the id is no longer discoverable and the group is the one resource with nothing left pointing at it.
+   - the CloudWatch log group `/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT`, which `DeleteAgentRuntime` does not remove. Copy the runtime id before deleting the runtime. Afterwards the id is no longer discoverable, and the group is the one resource with nothing left pointing at it.
 
 ## Security
 

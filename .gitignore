@@ -31,3 +31,12 @@ htmlcov/
 
 # Local authoring scratch, never part of the sample
 PR-DESCRIPTION.md
+
+
+# Figure authoring, deliberately not part of the sample.
+# The three diagrams ship as PNGs under images/ and nothing else. Their HTML sources
+# live outside this repo and the render script only exists to turn those sources into
+# those PNGs, so shipping either would give a reader a script that references files
+# they do not have. Regenerate figures from the authoring directory, not from a clone.
+architecture*.html
+scripts/render_figures.sh
