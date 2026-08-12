@@ -31,6 +31,7 @@ import io
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -222,6 +223,7 @@ class PackagingTest(unittest.TestCase):
         self.assertIn("--only-binary=:all:", argv)
         self.assertIn("--python-version", argv)
         self.assertIn(deploy_runtime.WHEEL_PYTHON, argv)
+        self.assertEqual(run.call_args.kwargs["executable"], sys.executable)
         self.assertTrue(run.call_args.kwargs["check"])
 
     def test_wheel_python_matches_the_declared_runtime(self):

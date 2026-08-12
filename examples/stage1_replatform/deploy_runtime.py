@@ -115,16 +115,18 @@ def _vendor_dependencies() -> None:
     """
     if os.path.isdir(VENDOR_DIR):
         shutil.rmtree(VENDOR_DIR)
-    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit -- list-form invocation with no shell; all arguments are literals or module constants
+    # Keep argv[0] literal while executing this process's interpreter, so pip
+    # installs here instead of into whichever Python appears first on PATH.
     subprocess.run(
         [
-            sys.executable, "-m", "pip", "install",
+            "python", "-m", "pip", "install",
             "--target", VENDOR_DIR,
             "--platform", WHEEL_PLATFORM,
             "--python-version", WHEEL_PYTHON,
             "--only-binary=:all:",
             "-r", os.path.join(REPO_ROOT, "requirements.txt"),
         ],
+        executable=sys.executable,
         check=True,
     )
 
