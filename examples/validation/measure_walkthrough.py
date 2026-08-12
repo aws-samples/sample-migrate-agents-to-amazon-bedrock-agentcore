@@ -87,7 +87,7 @@ class Measurements:
             failure = type(error).__name__
             raise
         finally:
-            if failure != "":
+            if bool(failure):
                 reason = f"time to FAIL with {failure}, not to reach this state"
                 note = f"{reason}; {note}" if note else reason
             self.record(name, round(time.monotonic() - started, 1), "s", note, bool(failure))
