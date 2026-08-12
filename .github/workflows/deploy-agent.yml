@@ -29,7 +29,7 @@
 name: Deploy Agent to AgentCore
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # checkov:skip=CKV_GHA_7:gateway_url and memory_id must come from the reader's AWS account; repository variables would break the sample
     inputs:
       gateway_url:
         description: "AgentCore Gateway MCP endpoint URL"

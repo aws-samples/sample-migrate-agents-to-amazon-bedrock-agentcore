@@ -113,6 +113,7 @@ def _vendor_dependencies() -> None:
     """
     if os.path.isdir(VENDOR_DIR):
         shutil.rmtree(VENDOR_DIR)
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit -- list-form invocation with no shell; all arguments are literals or module constants
     subprocess.run(
         [
             sys.executable, "-m", "pip", "install",
@@ -172,7 +173,7 @@ def build_zip(force: bool = False) -> Tuple[str, bool]:
     """
     fingerprint = _source_fingerprint()
     if not force and os.path.exists(ZIP_PATH) and os.path.exists(FINGERPRINT_PATH):
-        with open(FINGERPRINT_PATH) as handle:
+        with open(FINGERPRINT_PATH, encoding="utf-8") as handle:
             if handle.read().strip() == fingerprint:
                 size = os.path.getsize(ZIP_PATH) / 1e6
                 print(f"Reusing cached artifact {ZIP_PATH} ({size:.1f} MB)")
@@ -199,7 +200,7 @@ def build_zip(force: bool = False) -> Tuple[str, bool]:
     with zipfile.ZipFile(ZIP_PATH, "w", zipfile.ZIP_DEFLATED) as archive:
         for path, arcname in entries():
             archive.write(path, arcname)
-    with open(FINGERPRINT_PATH, "w") as handle:
+    with open(FINGERPRINT_PATH, "w", encoding="utf-8") as handle:
         handle.write(fingerprint)
     print(f"Built {ZIP_PATH} ({os.path.getsize(ZIP_PATH) / 1e6:.1f} MB)")
     return ZIP_PATH, True
@@ -390,6 +391,7 @@ def wait_ready(control, runtime_id: str, timeout: int = 420) -> float:
             reason = str(runtime.get("failureReason", "no failureReason given"))
             _fail_on_wrong_architecture(reason)
             raise RuntimeError(f"Runtime {runtime_id} is {status}: {reason}")
+        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetAgentRuntime readiness; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore runtimes
         time.sleep(2)
     raise TimeoutError(f"Runtime {runtime_id} not READY after {timeout}s")
 
@@ -535,6 +537,7 @@ def _create_when_the_role_is_visible(
                 ) from error
             if attempts == 1:
                 print(f"  role {ROLE_NAME} not visible to the service yet; retrying")
+            # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded retry of CreateAgentRuntime during IAM propagation; monotonic deadline raises RuntimeError, no boto3 waiter exists for AgentCore runtimes
             time.sleep(5)
 
 
@@ -597,6 +600,7 @@ def delete_runtime(runtime_id: str, region_name: str = "us-east-1") -> None:
             # teardown ends: the caller deletes this group as its own last step.
             print(f"  not deleted with it: {log_group_name(runtime_id)}")
             return
+        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetAgentRuntime deletion; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore runtimes
         time.sleep(2)
     raise TimeoutError(f"Runtime {runtime_id} still present after 180s")
 

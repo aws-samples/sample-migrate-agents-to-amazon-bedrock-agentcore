@@ -180,6 +180,7 @@ def assume(
             code = error.response.get("Error", {}).get("Code")
             if code != "AccessDenied" or time.monotonic() >= deadline:
                 raise
+            # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded retry of STS AssumeRole during IAM propagation; monotonic deadline stops retries, no boto3 waiter exists for propagation
             time.sleep(3)
 
 

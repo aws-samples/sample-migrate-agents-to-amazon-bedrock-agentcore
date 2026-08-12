@@ -157,6 +157,7 @@ def _wait_until_active(get, timeout: int = 300, **kwargs) -> dict:
             )
         if time.monotonic() >= deadline:
             raise TimeoutError(f"{kwargs} not ACTIVE after {timeout}s")
+        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetPolicyEngine/GetPolicy; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore policy resources
         time.sleep(5)
 
 
@@ -419,6 +420,7 @@ def delete_policy_engine(
         except control.exceptions.ValidationException:
             if time.monotonic() >= deadline:
                 raise
+            # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded retry of DeletePolicyEngine during attachment propagation; monotonic deadline stops retries, no boto3 waiter exists for AgentCore policy engines
             time.sleep(5)
     _wait_until_gone(
         control.get_policy_engine,
@@ -443,6 +445,7 @@ def _wait_until_gone(get, not_found, timeout: int, **kwargs) -> None:
             get(**kwargs)
         except not_found:
             return
+        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetPolicy/GetPolicyEngine deletion; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore policy resources
         time.sleep(2)
     raise TimeoutError(f"{kwargs} still present after {timeout}s")
 

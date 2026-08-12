@@ -148,6 +148,7 @@ def _wait_for_target_deletion(
             )
         except control.exceptions.ResourceNotFoundException:
             return
+        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetGatewayTarget deletion; monotonic while-condition stops polling, no boto3 waiter exists for AgentCore gateway targets
         time.sleep(2)
 
 
@@ -185,6 +186,7 @@ def _delete_gateway(control, gateway_id: str, timeout: int = 120) -> None:
         except control.exceptions.ValidationException:
             if time.monotonic() >= deadline:
                 raise
+            # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded retry of DeleteGateway while target detachment propagates; monotonic deadline stops retries, no boto3 waiter exists for AgentCore gateways
             time.sleep(5)
 
     while time.monotonic() < deadline:
@@ -193,6 +195,7 @@ def _delete_gateway(control, gateway_id: str, timeout: int = 120) -> None:
         except control.exceptions.ResourceNotFoundException:
             print(f"Deleted gateway {gateway_id}")
             return
+        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetGateway deletion; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore gateways
         time.sleep(2)
     raise TimeoutError(f"Gateway {gateway_id} still present after {timeout}s")
 

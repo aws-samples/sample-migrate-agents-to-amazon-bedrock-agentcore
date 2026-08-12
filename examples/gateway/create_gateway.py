@@ -47,6 +47,7 @@ def _wait_until_ready(client, gateway_id: str, timeout: int = 120) -> dict:
             raise RuntimeError(f"Gateway {gateway_id} is in unexpected status: {status}")
         if time.monotonic() >= deadline:
             raise TimeoutError(f"Gateway {gateway_id} not READY after {timeout}s")
+        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetGateway readiness; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore gateways
         time.sleep(2)
 
 

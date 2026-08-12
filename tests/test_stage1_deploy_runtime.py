@@ -466,7 +466,7 @@ def install_deploy_doubles(test, build=None) -> None:
     patcher.start()
     test.addCleanup(patcher.stop)
     if build is None:
-        build = lambda force=False: ("/tmp/agent.zip", False)  # noqa: E731
+        build = lambda force=False: ("mock-artifacts/agent.zip", False)  # noqa: E731
     patched_build = mock.patch.object(deploy_runtime, "build_zip", build)
     patched_build.start()
     test.addCleanup(patched_build.stop)
@@ -544,7 +544,7 @@ class DeployTest(unittest.TestCase):
     def test_the_zip_is_uploaded_before_the_runtime_is_created(self):
         """A runtime created against an absent key fails validation."""
         self.deploy()
-        self.assertIn(("upload_file", "/tmp/agent.zip", "migrated-agent-runtime-123456789012", "agent.zip"), self.s3.calls)
+        self.assertIn(("upload_file", "mock-artifacts/agent.zip", "migrated-agent-runtime-123456789012", "agent.zip"), self.s3.calls)
 
     def test_create_failed_on_arm64_raises_the_specific_error(self):
         self.control.statuses = ["CREATE_FAILED"]
@@ -642,7 +642,7 @@ class DeployTimingSplitTest(unittest.TestCase):
 
         def slow_build(force=False):
             self.clock.sleep(30)
-            return "/tmp/agent.zip", False
+            return "mock-artifacts/agent.zip", False
 
         install_deploy_doubles(self, build=slow_build)
 
