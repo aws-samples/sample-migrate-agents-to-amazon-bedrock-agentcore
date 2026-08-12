@@ -24,6 +24,8 @@ from typing import Dict, Tuple
 
 import boto3
 
+from examples.tools.interruptible_wait import interruptible_wait
+
 # Two names, one purpose each, and no permission difference between them.
 READ_ONLY_ROLE_NAME = "MigratedAgentReadOnlyCaller"
 SUPPORT_ROLE_NAME = "MigratedAgentSupportAgent"
@@ -180,8 +182,7 @@ def assume(
             code = error.response.get("Error", {}).get("Code")
             if code != "AccessDenied" or time.monotonic() >= deadline:
                 raise
-            # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded retry of STS AssumeRole during IAM propagation; monotonic deadline stops retries, no boto3 waiter exists for propagation
-            time.sleep(3)
+            interruptible_wait(3)
 
 
 def delete_demo_roles(region_name: str = "us-east-1") -> None:

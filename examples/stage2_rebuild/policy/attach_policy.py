@@ -37,6 +37,7 @@ from typing import Dict, List, Optional, Tuple
 import boto3
 
 from examples.tools.gateway_mcp_tools import build_mcp_client
+from examples.tools.interruptible_wait import interruptible_wait
 
 POLICY_FILE = Path(__file__).with_name("support_tools.cedar")
 POLICY_ENGINE_NAME = "SupportToolsPolicyEngine"
@@ -157,8 +158,7 @@ def _wait_until_active(get, timeout: int = 300, **kwargs) -> dict:
             )
         if time.monotonic() >= deadline:
             raise TimeoutError(f"{kwargs} not ACTIVE after {timeout}s")
-        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetPolicyEngine/GetPolicy; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore policy resources
-        time.sleep(5)
+        interruptible_wait(5)
 
 
 def _find_engine(control, name: str) -> Optional[str]:
@@ -420,8 +420,7 @@ def delete_policy_engine(
         except control.exceptions.ValidationException:
             if time.monotonic() >= deadline:
                 raise
-            # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded retry of DeletePolicyEngine during attachment propagation; monotonic deadline stops retries, no boto3 waiter exists for AgentCore policy engines
-            time.sleep(5)
+            interruptible_wait(5)
     _wait_until_gone(
         control.get_policy_engine,
         control.exceptions.ResourceNotFoundException,
@@ -445,8 +444,7 @@ def _wait_until_gone(get, not_found, timeout: int, **kwargs) -> None:
             get(**kwargs)
         except not_found:
             return
-        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetPolicy/GetPolicyEngine deletion; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore policy resources
-        time.sleep(2)
+        interruptible_wait(2)
     raise TimeoutError(f"{kwargs} still present after {timeout}s")
 
 

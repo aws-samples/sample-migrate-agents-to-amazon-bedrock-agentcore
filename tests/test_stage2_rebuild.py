@@ -2009,10 +2009,12 @@ def patch_boto3(test, module, **clients):
 
 
 def patch_clock(test, module):
-    """Swap the module's time for a clock that only advances when slept on."""
+    """Swap the module's clock and wait for a fake that advances instantly."""
     clock = FakeClock()
     test.addCleanup(setattr, module, "time", module.time)
+    test.addCleanup(setattr, module, "interruptible_wait", module.interruptible_wait)
     module.time = clock
+    module.interruptible_wait = clock.sleep
     return clock
 
 

@@ -50,6 +50,8 @@ from typing import NamedTuple, Optional, Tuple
 
 import boto3
 
+from examples.tools.interruptible_wait import interruptible_wait
+
 RUNTIME_NAME = "MigratedAgentRuntime"
 ROLE_NAME = "MigratedAgentRuntimeRole"
 
@@ -391,8 +393,7 @@ def wait_ready(control, runtime_id: str, timeout: int = 420) -> float:
             reason = str(runtime.get("failureReason", "no failureReason given"))
             _fail_on_wrong_architecture(reason)
             raise RuntimeError(f"Runtime {runtime_id} is {status}: {reason}")
-        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetAgentRuntime readiness; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore runtimes
-        time.sleep(2)
+        interruptible_wait(2)
     raise TimeoutError(f"Runtime {runtime_id} not READY after {timeout}s")
 
 
@@ -537,8 +538,7 @@ def _create_when_the_role_is_visible(
                 ) from error
             if attempts == 1:
                 print(f"  role {ROLE_NAME} not visible to the service yet; retrying")
-            # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded retry of CreateAgentRuntime during IAM propagation; monotonic deadline raises RuntimeError, no boto3 waiter exists for AgentCore runtimes
-            time.sleep(5)
+            interruptible_wait(5)
 
 
 def _explain_invoke_failure(error: Exception) -> None:
@@ -600,8 +600,7 @@ def delete_runtime(runtime_id: str, region_name: str = "us-east-1") -> None:
             # teardown ends: the caller deletes this group as its own last step.
             print(f"  not deleted with it: {log_group_name(runtime_id)}")
             return
-        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetAgentRuntime deletion; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore runtimes
-        time.sleep(2)
+        interruptible_wait(2)
     raise TimeoutError(f"Runtime {runtime_id} still present after 180s")
 
 

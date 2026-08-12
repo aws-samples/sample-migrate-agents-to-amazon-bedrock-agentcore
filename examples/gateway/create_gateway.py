@@ -20,6 +20,8 @@ from typing import Optional, Tuple
 
 import boto3
 
+from examples.tools.interruptible_wait import interruptible_wait
+
 
 def _find_existing_gateway(client, name: str) -> Optional[str]:
     """Return the gatewayId of an existing gateway with this name, or None."""
@@ -47,8 +49,7 @@ def _wait_until_ready(client, gateway_id: str, timeout: int = 120) -> dict:
             raise RuntimeError(f"Gateway {gateway_id} is in unexpected status: {status}")
         if time.monotonic() >= deadline:
             raise TimeoutError(f"Gateway {gateway_id} not READY after {timeout}s")
-        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetGateway readiness; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore gateways
-        time.sleep(2)
+        interruptible_wait(2)
 
 
 def existing_gateway_id(name: str, region_name: str = "us-east-1") -> Optional[str]:

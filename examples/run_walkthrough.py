@@ -116,6 +116,7 @@ from examples.stage2_rebuild.policy.demo_principals import (
 )
 from examples.stage2_rebuild.strands_agent import build_agent
 from examples.tools.gateway_mcp_tools import build_mcp_client
+from examples.tools.interruptible_wait import interruptible_wait
 from examples.validation.measure_walkthrough import (
     Measurements,
     count_events,
@@ -148,8 +149,7 @@ def _wait_for_target_deletion(
             )
         except control.exceptions.ResourceNotFoundException:
             return
-        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetGatewayTarget deletion; monotonic while-condition stops polling, no boto3 waiter exists for AgentCore gateway targets
-        time.sleep(2)
+        interruptible_wait(2)
 
 
 def _delete_target(control, gateway_id: str, target_id: str) -> None:
@@ -186,8 +186,7 @@ def _delete_gateway(control, gateway_id: str, timeout: int = 120) -> None:
         except control.exceptions.ValidationException:
             if time.monotonic() >= deadline:
                 raise
-            # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded retry of DeleteGateway while target detachment propagates; monotonic deadline stops retries, no boto3 waiter exists for AgentCore gateways
-            time.sleep(5)
+            interruptible_wait(5)
 
     while time.monotonic() < deadline:
         try:
@@ -195,8 +194,7 @@ def _delete_gateway(control, gateway_id: str, timeout: int = 120) -> None:
         except control.exceptions.ResourceNotFoundException:
             print(f"Deleted gateway {gateway_id}")
             return
-        # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep -- deadline-bounded poll of GetGateway deletion; loop raises TimeoutError past deadline, no boto3 waiter exists for AgentCore gateways
-        time.sleep(2)
+        interruptible_wait(2)
     raise TimeoutError(f"Gateway {gateway_id} still present after {timeout}s")
 
 

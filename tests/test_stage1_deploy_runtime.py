@@ -486,9 +486,9 @@ class DeployTest(unittest.TestCase):
 
     def setUp(self):
         install_deploy_doubles(self)
-        sleep = mock.patch.object(deploy_runtime.time, "sleep", lambda s: None)
-        sleep.start()
-        self.addCleanup(sleep.stop)
+        wait = mock.patch.object(deploy_runtime, "interruptible_wait", lambda s: None)
+        wait.start()
+        self.addCleanup(wait.stop)
 
     def deploy(self):
         return run_deploy(self)
@@ -638,7 +638,14 @@ class DeployTimingSplitTest(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock()
         self.addCleanup(setattr, deploy_runtime, "time", deploy_runtime.time)
+        self.addCleanup(
+            setattr,
+            deploy_runtime,
+            "interruptible_wait",
+            deploy_runtime.interruptible_wait,
+        )
         deploy_runtime.time = self.clock
+        deploy_runtime.interruptible_wait = self.clock.sleep
 
         def slow_build(force=False):
             self.clock.sleep(30)
